@@ -13,6 +13,8 @@ import nest_asyncio
 nest_asyncio.apply()
 
 INTERACTION_STUDENT_CONNECT_TA = 'ConnectTA'
+INTERACTION_STUDENT_DEQUEUE = 'DequeueConnectTA'
+INTERACTION_STUDENT_END_CHAT = 'EndConnectTA'
 INTERACTION_TA_LOGIN = 'TALogIn'
 INTERACTION_TA_DONE = 'TADone'
 INTERACTION_TA_PASS = 'TAPass'
@@ -24,26 +26,42 @@ class TA:
     def __init__(self, uid):
         self.uid = uid
         self.busy = False
-        self.helping_who = None
+        self.helping_who = 'ERR: NOT HELPING ANYONE'
         self.active = False
         self.name = get_user_name(uid)
+        self.im = slack_web_client.conversations_open(users=[self.uid])['channel']['id']
 
     def assign(self, student_id):
-        """ Assigns a TA with a student. Returns False if TA is busy. """
-        if self.busy:
-            return False
-        else:
-            self.busy = True
-            self.helping_who = student_id
-            return True
+        assert not self.busy
+        self.busy = True
+        self.helping_who = student_id
+        slack_web_client.chat_postMessage(
+            channel=self.im,
+            blocks=get_request_block(self.helping_who)
+        )
 
     def complete(self):
         assert self.busy
         self.busy = False
-        self.helping_who = None
+        self.helping_who = 'ERR: NOT HELPING ANYONE'
+        student_status[self.helping_who] = 'idle'
 
     def toggle_active(self):
         self.active = not self.active
+        if self.active:
+            slack_web_client.chat_postMessage(
+                channel=self.im,
+                text="You have started accepting requests!"
+            )
+        else:
+            slack_web_client.chat_postMessage(
+                channel=self.im,
+                text="You are no longer accepting requests!"
+            )
+
+    def reassign(self):
+        # Notify student, change student_ta_connection, change self status, etc
+        raise NotImplementedError()
 
 
 free_ta = []
@@ -52,20 +70,26 @@ student_queue = []
 tas = dict()
 id_to_name = dict()
 id_to_teamId = dict()
+student_status = dict()  # TODO: Refactor this into a class
+student_ta_connection = dict()
 
 
 def get_app_home(user_id):
+    if user_id not in student_status.keys():
+        student_status[user_id] = 'idle'
+    current_status = student_status[user_id]
+
     blocks = [
         {"type": "section",
-         "text": {"type": "mrkdwn", "text": f"Hi {get_user_name(user_id)} :wave:"}
+         "text": {"type": "mrkdwn", "text": f"^^^ Click to refresh\nHi {get_user_name(user_id)} :wave:"}
          },
         {"type": "section",
-         "text": {"type": "mrkdwn", "text": "I'm here to help you find a TA during lab section"
+         "text": {"type": "mrkdwn", "text": "I'm here to help you find a TA during lab section."
                   }
          },
         {"type": "divider"},
         {"type": "section",
-         "text": {"type": "mrkdwn", "text": f"{len(free_ta) + len(busy_ta)} TAs Active:"}
+         "text": {"type": "mrkdwn", "text": f"{len(free_ta) + len(busy_ta)} TA(s) Active:"}
          }]
     for ta in free_ta:
         blocks.append(
@@ -75,34 +99,56 @@ def get_app_home(user_id):
     for ta in busy_ta:
         blocks.append(
             {"type": "section",
-             "text": {"type": "mrkdwn", "text": f"_(Busy) {ta.name}_"}}
+             "text": {"type": "mrkdwn",
+                      "text": f"_(Busy) {ta.name}_ Helping {get_user_name(ta.helping_who)} <- FIXME: Make visible only to TA"}}
         )
-    blocks += [
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "Connect to a TA",
-                        "emoji": True
-                    },
-                    "value": INTERACTION_STUDENT_CONNECT_TA
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "TA Login",
-                        "emoji": True
-                    },
-                    "value": INTERACTION_TA_LOGIN
-                }
-            ]
-        }
-    ]
+    blocks += [{"type": "divider"}]
 
+    if current_status == 'idle':
+        blocks += [{"type": "section",
+                    "text": {"type": "mrkdwn", "text": f"Click `Connect to TA` to request a TA"}}]
+        blocks += [
+            {"type": "actions",
+             "elements": [{"type": "button",
+                           "text": {"type": "plain_text",
+                                    "text": "Connect to a TA",
+                                    "emoji": True},
+                           "value": INTERACTION_STUDENT_CONNECT_TA},
+                          {"type": "button",
+                           "text": {"type": "plain_text",
+                                    "text": "TA Login (passwd: bestvirus)",
+                                    "emoji": True},
+                           "value": INTERACTION_TA_LOGIN}
+                          ]
+             }]
+    elif current_status == 'queued':
+        blocks += [{"type": "section",
+                    "text": {"type": "mrkdwn",
+                             "text": f"You are at position {student_queue.index(user_id) + 1} in the queue"}},
+                   {"type": "actions",
+                    "elements": [{"type": "button",
+                                  "text": {"type": "plain_text",
+                                           "text": "Cancel Request",
+                                           "emoji": True},
+                                  "value": INTERACTION_STUDENT_DEQUEUE}
+                                 ]
+                    }]
+    elif current_status == 'busy':
+        blocks += [{"type": "section",
+                    "text": {"type": "mrkdwn",
+                             # TODO: Print TA Name as well
+                             "text": f"You are connected with a TA. Look for their direct message in a moment."}},
+                   {"type": "actions",
+                    "elements": [{"type": "button",
+                                  "text": {"type": "plain_text",
+                                           "text": "End Chat",
+                                           "emoji": True},
+                                  "value": INTERACTION_STUDENT_END_CHAT}
+                                 ]
+                    }
+                   ]
+    else:
+        raise ValueError(f"Unexpected current_status: {current_status} for student {get_user_name(user_id)}")
     return {
         "type": "home",
         "blocks": blocks
@@ -156,7 +202,7 @@ def get_request_block(student_uid):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"You have a new request from <{student_name}>:\n*<{student_im}|Click to chat with {student_name} >*"
+                "text": f"You have a new request from {student_name}:\n*<{student_im}|Click to chat with {student_name} >*"
             }
         },
         {
@@ -164,7 +210,7 @@ def get_request_block(student_uid):
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": "*Question Brief:*\n<question brief>"
+                    "text": "*Question Brief:*\n<FIXME>"
                 }
             ]
         },
@@ -239,7 +285,7 @@ def mentioned(payload):
 #     channel_id = event.get("channel")
 #     text = event.get("text")
 
-    # debug_print_msg(payload)
+# debug_print_msg(payload)
 
 
 def debug_print_msg(payload):
@@ -286,6 +332,45 @@ def process_view_submission(payload):
                 assert the_ta in free_ta
                 free_ta.remove(the_ta)
             the_ta.toggle_active()
+    slack_web_client.views_publish(user_id=user_id,
+                                   view=get_app_home(user_id))
+
+def connect_student(payload):
+    user_id = payload['user']['id']
+    trigger_id = payload['trigger_id']
+    assert student_status[user_id] == 'idle'
+
+    if len(free_ta) == 0:
+        student_status[user_id] = 'queued'
+        student_queue.append(user_id)
+        slack_web_client.views_publish(user_id=user_id,
+                                       view=get_app_home(user_id))
+    else:
+        student_status[user_id] = 'busy'
+        assigned_ta = free_ta[0]
+        assigned_ta.assign(user_id)
+        busy_ta.append(assigned_ta)
+        free_ta.remove(assigned_ta)
+        slack_web_client.views_publish(user_id=user_id,
+                                       view=get_app_home(user_id))
+    print("Student connection request!")
+
+
+def dequeue_student(payload):
+    user_id = payload['user']['id']
+    trigger_id = payload['trigger_id']
+    student_queue.remove(user_id)
+    student_status[user_id] = 'idle'
+    slack_web_client.views_publish(user_id=user_id,
+                                   view=get_app_home(user_id))
+
+
+def disconnect_student(payload):
+    user_id = payload['user']['id']
+    student_status[user_id] = 'idle'
+    slack_web_client.views_publish(user_id=user_id,
+                                   view=get_app_home(user_id))
+    # TODO: Notify TA connected with this student
 
 
 # https://api.slack.com/messaging/interactivity
@@ -302,7 +387,11 @@ def interactive_test():
         assert len(actions) == 1
         action_value = actions[0]['value']
         if action_value == INTERACTION_STUDENT_CONNECT_TA:
-            print("Student request connect to TA!")
+            connect_student(payload)
+        elif action_value == INTERACTION_STUDENT_DEQUEUE:
+            dequeue_student(payload)
+        elif action_value == INTERACTION_STUDENT_END_CHAT:
+            disconnect_student(payload)
         elif action_value == INTERACTION_TA_DONE:
             channel_id = payload['channel']['id']
             msg_ts = payload['message']['ts']
