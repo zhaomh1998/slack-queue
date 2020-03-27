@@ -1,13 +1,18 @@
 import os
 import logging
-from flask import Flask
+from flask import Flask, request, make_response, Response
 from slack import WebClient
 from slackeventsapi import SlackEventAdapter
 import ssl as ssl_lib
 import certifi
+import json
+
+INTERACTION_STUDENT_CONNECT_TA = 'ConnectTA'
+INTERACTION_TA_DONE = 'TADone'
+INTERACTION_TA_PASS = 'TAPass'
 
 
-def get_app_home():
+def get_app_home(user_id):
     return {
         "type": "home",
         "blocks": [
@@ -15,7 +20,7 @@ def get_app_home():
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "Hi David :wave:"
+                    "text": f"Hi {get_user_name(user_id)} :wave:"
                 }
             },
             {
@@ -49,7 +54,7 @@ def get_app_home():
                             "text": "Connect to a Tutor / TA",
                             "emoji": True
                         },
-                        "value": "click_me_123"
+                        "value": INTERACTION_STUDENT_CONNECT_TA
                     }
                 ]
             }
@@ -59,48 +64,48 @@ def get_app_home():
 
 def get_request_block():
     return [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "You have a new request from <studentName>:\n*<fakeLink.toEmployeeProfile.com|Click to chat with studentName>*"
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {
-                        "type": "mrkdwn",
-                        "text": "*Question Brief:*\n<question brief>"
-                    }
-                ]
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {
-                            "type": "plain_text",
-                            "emoji": True,
-                            "text": "Finished!"
-                        },
-                        "style": "primary",
-                        "value": "click_me_123"
-                    },
-                    {
-                        "type": "button",
-                        "text": {
-                            "type": "plain_text",
-                            "emoji": True,
-                            "text": "Pass to Other Tutor"
-                        },
-                        "style": "danger",
-                        "value": "click_me_123"
-                    }
-                ]
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "You have a new request from <studentName>:\n*<fakeLink.toEmployeeProfile.com|Click to chat with studentName>*"
             }
-        ]
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": "*Question Brief:*\n<question brief>"
+                }
+            ]
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "emoji": True,
+                        "text": "Finished!"
+                    },
+                    "style": "primary",
+                    "value": INTERACTION_TA_DONE
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "emoji": True,
+                        "text": "Pass to Other Tutor"
+                    },
+                    "style": "danger",
+                    "value": INTERACTION_TA_PASS
+                }
+            ]
+        }
+    ]
 
 
 # Initialize a Flask app to host the events adapter
@@ -119,7 +124,7 @@ def home_open(payload):
     user_id = event.get("user")
     print(f"Home opened from {user_id}")
     slack_web_client.views_publish(user_id=user_id,
-                                   view=get_app_home())
+                                   view=get_app_home(user_id))
 
 
 @slack_events_adapter.on("app_mention")
@@ -136,8 +141,9 @@ def mentioned(payload):
 def message(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
+    # Disregard message from None which could be a message-delete event
     # Disregard own message
-    if user_id == bot_user.data['user_id']:
+    if user_id is None or user_id == bot_user.data['user_id']:
         return
     channel_id = event.get("channel")
     text = event.get("text")
@@ -156,14 +162,66 @@ def debug_print_msg(payload):
 
     slack_web_client.chat_postMessage(
         channel=channel_id,
+        text=f"""Hello! :tada: I received from {get_user_name(user_id)} on channel {get_channel_name(channel_id)}! Event type is {event.get("type")}
+{text}
+"""
+    )
+    slack_web_client.chat_postMessage(
+        channel=channel_id,
         blocks=get_request_block()
-#         text=f"""Hello! :tada:
-# I received >>{text}<< from {user_id} on channel {channel_id}!
-# Event type is {event.get("type")}
-#         """
     )
 
-    # slack_web_client.views_publish(user_id=user_id, view=get_request_block())
+
+# https://api.slack.com/messaging/interactivity
+@app.route("/slack/interactive-endpoint", methods=["POST"])
+def interactive_test():
+    payload = json.loads(request.form["payload"])
+    assert payload['type'] == 'block_actions'
+    # trigger_id = payload['trigger_id']
+    # response_url = payload['response_url']
+    actions = payload['actions']
+    assert len(actions) == 1
+    action_value = actions[0]['value']
+    if action_value == INTERACTION_STUDENT_CONNECT_TA:
+        print("Student request connect to TA!")
+    elif action_value == INTERACTION_TA_DONE:
+        channel_id = payload['channel']['id']
+        msg_ts = payload['message']['ts']
+        print("TA Done!")
+        slack_web_client.chat_delete(
+            channel=channel_id,
+            ts=msg_ts
+        )
+        slack_web_client.chat_postMessage(
+            channel=channel_id,
+            text='TA Done!')
+    elif action_value == INTERACTION_TA_PASS:
+        channel_id = payload['channel']['id']
+        msg_ts = payload['message']['ts']
+        print("TA Pass to next TA!")
+        slack_web_client.chat_delete(
+            channel=channel_id,
+            ts=msg_ts
+        )
+        slack_web_client.chat_postMessage(
+            channel=channel_id,
+            text='TA Pass!')
+
+    # Send an HTTP 200 response with empty body so Slack knows we're done here
+    return make_response("", 200)
+
+
+def get_user_name(user_id):
+    return slack_web_client.users_info(user=user_id).data['user']['profile']['display_name']
+
+
+def get_channel_name(channel_id):
+    channel_info = slack_web_client.conversations_info(channel=channel_id).data['channel']
+    if channel_info['is_im']:
+        im_with = channel_info['user']
+        return f'Private Message with {get_user_name(im_with)}'
+    else:
+        return channel_info['name_normalized']
 
 
 if __name__ == "__main__":
