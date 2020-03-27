@@ -43,8 +43,8 @@ class TA:
     def complete(self):
         assert self.busy
         self.busy = False
-        self.helping_who = 'ERR: NOT HELPING ANYONE'
         student_status[self.helping_who] = 'idle'
+        self.helping_who = 'ERR: NOT HELPING ANYONE'
 
     def toggle_active(self):
         self.active = not self.active
@@ -138,14 +138,15 @@ def get_app_home(user_id):
                     "text": {"type": "mrkdwn",
                              # TODO: Print TA Name as well
                              "text": f"You are connected with a TA. Look for their direct message in a moment."}},
-                   {"type": "actions",
-                    "elements": [{"type": "button",
-                                  "text": {"type": "plain_text",
-                                           "text": "End Chat",
-                                           "emoji": True},
-                                  "value": INTERACTION_STUDENT_END_CHAT}
-                                 ]
-                    }
+                   # TODO: Haven't implemented notify TA so disabled for now
+                   # {"type": "actions",
+                   #  "elements": [{"type": "button",
+                   #                "text": {"type": "plain_text",
+                   #                         "text": "End Chat",
+                   #                         "emoji": True},
+                   #                "value": INTERACTION_STUDENT_END_CHAT}
+                   #               ]
+                   #  }
                    ]
     else:
         raise ValueError(f"Unexpected current_status: {current_status} for student {get_user_name(user_id)}")
@@ -205,15 +206,17 @@ def get_request_block(student_uid):
                 "text": f"You have a new request from {student_name}:\n*<{student_im}|Click to chat with {student_name} >*"
             }
         },
-        {
-            "type": "section",
-            "fields": [
-                {
-                    "type": "mrkdwn",
-                    "text": "*Question Brief:*\n<FIXME>"
-                }
-            ]
-        },
+        # TODO
+        # {
+        #     "type": "section",
+        #     "fields": [
+        #         {
+        #             "type": "mrkdwn",
+        #             "text": "*Question Brief:*\n<FIXME>"
+        #         }
+        #     ]
+        # },
+
         {
             "type": "actions",
             "elements": [
@@ -227,16 +230,16 @@ def get_request_block(student_uid):
                     "style": "primary",
                     "value": INTERACTION_TA_DONE
                 },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "emoji": True,
-                        "text": "Pass to Other TA"
-                    },
-                    "style": "danger",
-                    "value": INTERACTION_TA_PASS
-                }
+                # {
+                #     "type": "button",
+                #     "text": {
+                #         "type": "plain_text",
+                #         "emoji": True,
+                #         "text": "Pass to Other TA"
+                #     },
+                #     "style": "danger",
+                #     "value": INTERACTION_TA_PASS
+                # }
             ]
         }
     ]
@@ -322,6 +325,7 @@ def process_view_submission(payload):
         if not the_ta.active:
             free_ta.append(the_ta)
             the_ta.toggle_active()
+            check_student_queue()
         # TA Log off
         else:
             if the_ta in busy_ta:
@@ -334,6 +338,7 @@ def process_view_submission(payload):
             the_ta.toggle_active()
     slack_web_client.views_publish(user_id=user_id,
                                    view=get_app_home(user_id))
+
 
 def connect_student(payload):
     user_id = payload['user']['id']
@@ -353,7 +358,7 @@ def connect_student(payload):
         free_ta.remove(assigned_ta)
         slack_web_client.views_publish(user_id=user_id,
                                        view=get_app_home(user_id))
-    print("Student connection request!")
+    print("Student connected!")
 
 
 def dequeue_student(payload):
@@ -366,11 +371,45 @@ def dequeue_student(payload):
 
 
 def disconnect_student(payload):
+    raise NotImplementedError()
     user_id = payload['user']['id']
     student_status[user_id] = 'idle'
     slack_web_client.views_publish(user_id=user_id,
                                    view=get_app_home(user_id))
     # TODO: Notify TA connected with this student
+
+
+def check_student_queue():
+    assert len(free_ta) != 0
+    if len(student_queue) != 0:
+        # Dequeue
+        user_id = student_queue[0]
+        student_queue.remove(user_id)
+
+        student_status[user_id] = 'busy'
+        assigned_ta = free_ta[0]
+        assigned_ta.assign(user_id)
+        busy_ta.append(assigned_ta)
+        free_ta.remove(assigned_ta)
+        slack_web_client.views_publish(user_id=user_id,
+                                       view=get_app_home(user_id))
+
+
+def ta_complete(user_id):
+    the_ta = tas[user_id]
+    the_ta.complete()
+    free_ta.append(the_ta)
+    busy_ta.remove(the_ta)
+    check_student_queue()
+
+
+def ta_reassign(user_id):
+    raise NotImplementedError()
+    the_ta = tas[user_id]
+    the_ta.reassign()
+    free_ta.append(the_ta)
+    busy_ta.remove(the_ta)
+    check_student_queue()
 
 
 # https://api.slack.com/messaging/interactivity
@@ -395,6 +434,9 @@ def interactive_test():
         elif action_value == INTERACTION_TA_DONE:
             channel_id = payload['channel']['id']
             msg_ts = payload['message']['ts']
+            user_id = payload['user']['id']
+            student_name = get_user_name(tas[user_id].helping_who)
+            ta_complete(user_id)
             print("TA Done!")
             slack_web_client.chat_delete(
                 channel=channel_id,
@@ -402,10 +444,12 @@ def interactive_test():
             )
             slack_web_client.chat_postMessage(
                 channel=channel_id,
-                text='TA Done!')
+                text=f'Finished helping {student_name}')
         elif action_value == INTERACTION_TA_PASS:
             channel_id = payload['channel']['id']
             msg_ts = payload['message']['ts']
+            user_id = payload['user']['id']
+            ta_reassign(user_id)
             print("TA Pass to next TA!")
             slack_web_client.chat_delete(
                 channel=channel_id,
