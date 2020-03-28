@@ -59,6 +59,12 @@ class TA:
                 text="You are no longer accepting requests!"
             )
 
+    def __str__(self):
+        if self.busy:
+            return f'(Busy) {self.name} helping {get_user_name(self.helping_who)}'
+        else:
+            return f'{self.name}'
+
     def reassign(self):
         # Notify student, change student_ta_connection, change self status, etc
         raise NotImplementedError()
@@ -116,7 +122,7 @@ def get_app_home(user_id):
                            "value": INTERACTION_STUDENT_CONNECT_TA},
                           {"type": "button",
                            "text": {"type": "plain_text",
-                                    "text": "TA Login (passwd: bestvirus)",
+                                    "text": "TA Login",
                                     "emoji": True},
                            "value": INTERACTION_TA_LOGIN}
                           ]
@@ -250,7 +256,9 @@ app = Flask(__name__)
 slack_events_adapter = SlackEventAdapter(os.environ["SLACK_SIGNING_SECRET"], "/slack/events", app)
 
 # Initialize a Web API client
-slack_web_client = WebClient(token=os.environ['SLACK_BOT_TOKEN'])
+# Note: Slack WebClient need to be in async mode in order to get two request at same time to work
+# https://github.com/slackapi/python-slackclient/issues/429
+slack_web_client = WebClient(token=os.environ['SLACK_BOT_TOKEN'])#, run_async=True)
 bot_user = slack_web_client.auth_test()
 all_users = slack_web_client.users_list()
 
