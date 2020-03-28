@@ -13,12 +13,14 @@ import ui
 # Resolved "Event loop already running" when running multiple API calls at same time
 nest_asyncio.apply()
 
+INTERACTION_STUDENT_REFRESH = 'RefreshHomePage'
 INTERACTION_STUDENT_CONNECT_TA = 'ConnectTA'
 INTERACTION_STUDENT_DEQUEUE = 'DequeueConnectTA'
 INTERACTION_STUDENT_END_CHAT = 'EndConnectTA'
 INTERACTION_TA_LOGIN = 'TALogIn'
 INTERACTION_TA_DONE = 'TADone'
 INTERACTION_TA_PASS = 'TAPass'
+INTERACTION_ADMIN_RESET = 'AdminReset'
 INPUT_TA_PASS_ID = 'TAPassID'
 TA_PASSWORD = os.environ["SLACK_TA_PASSWD"]
 
@@ -136,10 +138,23 @@ def get_app_home(user_id):
         student_status[user_id] = 'idle'
     current_status = student_status[user_id]
 
-    is_ta = True if ((user_id in tas) or (is_admin(user_id))) else False
+    is_ta = True if user_id in tas else False
+
+    # Info
     blocks = [
         ui.welcome_title(get_user_name(user_id)),
         ui.greeting(is_ta),
+    ]
+
+    # Control Panel for TA Only
+    if is_ta:
+        blocks += [
+            ui.DIVIDER,
+            ui.text(f"Student Queue Length: {len(student_queue)}"),
+            ui.actions([ui.button("Admin Reset", INTERACTION_ADMIN_RESET)])
+        ]
+
+    blocks += [
         ui.DIVIDER,
         ui.active_ta(len(free_ta) + len(busy_ta))
     ]
@@ -147,39 +162,20 @@ def get_app_home(user_id):
     blocks += [ui.text(ta.get_status_text(ta_view=is_ta)) for ta in busy_ta]
     blocks += [ui.DIVIDER]
 
+    # Functional
     if current_status == 'idle':
         blocks += [ui.text("Click `Connect to TA` to request a TA")]
-        blocks += [
-            {"type": "actions",
-             "elements": [{"type": "button",
-                           "text": {"type": "plain_text",
-                                    "text": "Connect to a TA",
-                                    "emoji": True},
-                           "value": INTERACTION_STUDENT_CONNECT_TA},
-                          {"type": "button",
-                           "text": {"type": "plain_text",
-                                    "text": "TA Login",
-                                    "emoji": True},
-                           "value": INTERACTION_TA_LOGIN}
-                          ]
-             }]
+        blocks += [ui.actions([
+            ui.button("Connect to a TA", INTERACTION_STUDENT_CONNECT_TA),
+            ui.button("TA Login", INTERACTION_TA_LOGIN),
+        ])]
     elif current_status == 'queued':
-        blocks += [{"type": "section",
-                    "text": {"type": "mrkdwn",
-                             "text": f"You are at position {student_queue.index(user_id) + 1} in the queue"}},
-                   {"type": "actions",
-                    "elements": [{"type": "button",
-                                  "text": {"type": "plain_text",
-                                           "text": "Cancel Request",
-                                           "emoji": True},
-                                  "value": INTERACTION_STUDENT_DEQUEUE}
-                                 ]
-                    }]
+        blocks += [ui.text(f"You are #{student_queue.index(user_id) + 1} in the queue"),
+                   ui.actions([ui.button("Cancel Request", INTERACTION_STUDENT_DEQUEUE)])
+        ]
     elif current_status == 'busy':
-        blocks += [{"type": "section",
-                    "text": {"type": "mrkdwn",
-                             # TODO: Print TA Name as well
-                             "text": f"You are connected with a TA. Look for their direct message in a moment."}},
+        blocks += [
+            ui.text("You are connected with a TA. Look for their direct message in a moment.")
                    # TODO: Haven't implemented notify TA so disabled for now
                    # {"type": "actions",
                    #  "elements": [{"type": "button",
@@ -189,9 +185,11 @@ def get_app_home(user_id):
                    #                "value": INTERACTION_STUDENT_END_CHAT}
                    #               ]
                    #  }
-                   ]
+        ]
     else:
         raise ValueError(f"Unexpected current_status: {current_status} for student {get_user_name(user_id)}")
+
+    blocks += [ui.actions([ui.button("Refresh", INTERACTION_STUDENT_REFRESH)])]
     return {
         "type": "home",
         "blocks": blocks
@@ -344,6 +342,10 @@ def interactive_test():
         actions = payload['actions']
         assert len(actions) == 1
         action_value = actions[0]['value']
+        if action_value == INTERACTION_STUDENT_REFRESH:
+            user_id = payload['user']['id']
+            slack_web_client.views_publish(user_id=user_id,
+                                           view=get_app_home(user_id))
         if action_value == INTERACTION_STUDENT_CONNECT_TA:
             student_connect(payload)
         elif action_value == INTERACTION_STUDENT_DEQUEUE:
