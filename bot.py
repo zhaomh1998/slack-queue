@@ -160,13 +160,11 @@ def get_app_home(user_id):
     ]
     blocks += [ui.text(ta.name) for ta in free_ta]
     blocks += [ui.text(ta.get_status_text(ta_view=is_ta)) for ta in busy_ta]
-    blocks += [ui.DIVIDER]
 
     # Functional
     if current_status == 'idle':
-        blocks += [ui.text("Click `Connect to TA` to request a TA")]
         blocks += [ui.actions([
-            ui.button("Connect to a TA", INTERACTION_STUDENT_CONNECT_TA),
+            ui.button(":telephone_receiver: Connect to a TA", INTERACTION_STUDENT_CONNECT_TA),
             ui.button("TA Login", INTERACTION_TA_LOGIN),
         ])]
     elif current_status == 'queued':
@@ -189,7 +187,7 @@ def get_app_home(user_id):
     else:
         raise ValueError(f"Unexpected current_status: {current_status} for student {get_user_name(user_id)}")
 
-    blocks += [ui.actions([ui.button("Refresh", INTERACTION_STUDENT_REFRESH)])]
+    blocks += [ui.actions([ui.button(":arrows_counterclockwise: Refresh", INTERACTION_STUDENT_REFRESH)])]
     return {
         "type": "home",
         "blocks": blocks
