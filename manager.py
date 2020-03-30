@@ -2,21 +2,28 @@ from api import *
 
 
 class TA:
-    def __init__(self, slack, uid):
+    @classmethod
+    async def create(cls, slack, uid):
+        """
+        Factory to create a TA object with await
+        https://stackoverflow.com/questions/33128325/how-to-set-class-attribute-with-await-in-init/33134213
+        """
         assert isinstance(slack, Slack)
+        self = TA()
         self.slack = slack
         self.uid = uid
         self.active = False
         self.busy = False
         self.helping_who = 'ERR: NOT HELPING ANYONE'
-        self.name = slack.get_user_name(uid)
-        self.im = slack.get_im_channel(uid)
+        self.name = await slack.get_user_name(uid)
+        self.im = await slack.get_im_channel(uid)
+        return self
 
-    def assign(self, student_id):
+    async def assign(self, student_id):
         assert not self.busy
         self.busy = True
         self.helping_who = student_id
-        self.slack.send_chat_block(self.im, self.slack.get_request_block(student_id))
+        await self.slack.send_chat_block(self.im, await self.slack.get_request_block(student_id))
 
     # FIXME: Bug: log off then you can't complete current request
     def complete(self):
@@ -32,17 +39,17 @@ class TA:
         self.helping_who = 'ERR: NOT HELPING ANYONE'
         return finished_student
 
-    def toggle_active(self):
+    async def toggle_active(self):
         self.active = not self.active
         if self.active:
-            self.slack.send_chat_text(self.im, "You have started accepting requests!")
+            await self.slack.send_chat_text(self.im, "You have started accepting requests!")
         else:
-            self.slack.send_chat_text(self.im, "You are logged off and are no longer accepting new requests!")
+            await self.slack.send_chat_text(self.im, "You are logged off and are no longer accepting new requests!")
 
-    def get_status_text(self, ta_view):
+    async def get_status_text(self, ta_view):
         if self.busy:
             if ta_view:
-                return f'(Busy) {self.name} currently helping {self.slack.get_user_name(self.helping_who)}'
+                return f'(Busy) {self.name} currently helping {await self.slack.get_user_name(self.helping_who)}'
             else:
                 return f'(Busy) {self.name} currently helping a student'
         else:
@@ -79,9 +86,9 @@ class QueueManager:
         self.student_ta_connection = dict()
         self.slack = slack_web_client
 
-    def ta_login(self, user_id):
+    async def ta_login(self, user_id):
         if user_id not in self.tas.keys():
-            self.tas[user_id] = TA(self.slack, user_id)
+            self.tas[user_id] = await TA.create(self.slack, user_id)
 
         the_ta = self.tas[user_id]
 
@@ -89,17 +96,17 @@ class QueueManager:
         # A new TA added, check queue
         if not the_ta.active:
             self.free_ta.append(the_ta)
-            the_ta.toggle_active()
-            self.queue_move()
+            await the_ta.toggle_active()
+            await self.queue_move()
 
         # TA Log off
         else:
             if the_ta in self.free_ta:
                 self.free_ta.remove(the_ta)
             # The TA complete process is responsible for removing the TA if it's already inactive (no new request)
-            the_ta.toggle_active()
+            await the_ta.toggle_active()
 
-    def ta_complete_request(self, ta_user_id):
+    async def ta_complete_request(self, ta_user_id):
         """
         Complete request from TA side
         Checks it the TA is still online. If so, process student waiting queue.
@@ -112,11 +119,11 @@ class QueueManager:
         self.student_status[finished_student] = 'idle'
         if the_ta.active:
             self.free_ta.append(the_ta)
-            self.queue_move()
+            await self.queue_move()
         del self.pairs[the_ta]
-        return self.slack.get_user_name(finished_student)
+        return await self.slack.get_user_name(finished_student)
 
-    def student_connect(self, user_id, trigger_id):
+    async def student_request(self, user_id, trigger_id):
         """
         Search for a free TA and connect with the student, or put student into queue if no free TA
         Caller responsible to refresh student afterwards
@@ -131,11 +138,16 @@ class QueueManager:
             self.student_status[user_id] = 'queued'
             self.student_queue.append(user_id)
         else:
-            self.student_status[user_id] = 'busy'
-            assigned_ta = self.free_ta[0]
-            assigned_ta.assign(user_id)
-            self.pairs[assigned_ta] = user_id
-            self.free_ta.remove(assigned_ta)
+            await self.make_connection(user_id)
+
+    async def make_connection(self, student_id, free_ta_index=0):
+        assert len(self.free_ta) != 0
+        assert free_ta_index < len(self.free_ta)
+        self.student_status[student_id] = 'busy'
+        assigned_ta = self.free_ta[free_ta_index]
+        await assigned_ta.assign(student_id)
+        self.pairs[assigned_ta] = student_id
+        self.free_ta.remove(assigned_ta)
 
     def student_remove_from_queue(self, user_id, trigger_id):
         assert user_id in self.student_queue
@@ -166,19 +178,14 @@ class QueueManager:
 
         return self.student_status[user_id]
 
-    def queue_move(self):
+    async def queue_move(self):
         assert len(self.free_ta) != 0
         if len(self.student_queue) != 0:
             # Dequeue student
-            user_id = self.student_queue[0]
-            self.student_queue.remove(user_id)
+            student_id = self.student_queue[0]
+            self.student_queue.remove(student_id)
 
-            self.student_status[user_id] = 'busy'
-            assigned_ta = self.free_ta[0]
-            slack_operation = assigned_ta.assign(user_id)
-            self.busy_ta.append(assigned_ta)
-            self.free_ta.remove(assigned_ta)
-            return slack_operation
+            await self.make_connection(student_id)
 
     def get_ta_login_text(self, user_id):
         if user_id not in self.tas:

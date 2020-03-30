@@ -1,6 +1,6 @@
 import os
 import logging
-from flask import Flask, request, make_response, Response
+from quart import Quart, request, make_response, Response
 # from slackeventsapi import SlackEventAdapter
 import ssl as ssl_lib
 import certifi
@@ -10,6 +10,9 @@ import ui
 from time import time
 from manager import QueueManager
 from api import *
+import asyncio
+from hypercorn.config import Config
+from hypercorn.asyncio import serve
 #
 # # https://github.com/spyder-ide/spyder/issues/7096
 # # Resolved "Event loop already running" when running multiple API calls at same time
@@ -18,87 +21,90 @@ from api import *
 TA_PASSWORD = os.environ["SLACK_TA_PASSWD"]
 
 # Initialize a Flask app to host the events adapter
-app = Flask(__name__)
+app = Quart(__name__)
 # slack_events_adapter = SlackEventAdapter(os.environ["SLACK_SIGNING_SECRET"], "/slack/events", app)
 slack = Slack(os.environ['SLACK_BOT_TOKEN'], os.environ["SLACK_SIGNING_SECRET"])
 manager = QueueManager(slack)
 
 
 @app.route("/slack/events", methods=['POST'])
-def slack_event():
+async def slack_event():
+    req_header = request.headers
+    req_data = await request.data
     # Each request comes with request timestamp and request signature
     # emit an error if the timestamp is out of range
-    req_timestamp = request.headers.get('X-Slack-Request-Timestamp')
+    req_timestamp = req_header.get('X-Slack-Request-Timestamp')
     if abs(time() - int(req_timestamp)) > 60 * 5:
         logger.exception('Invalid request timestamp')
-        return make_response("", 403)
+        return await make_response("", 403)
 
     # Verify the request signature using the app's signing secret
     # emit an error if the signature can't be verified
-    req_signature = request.headers.get('X-Slack-Signature')
-    if not slack.verify_signature(req_timestamp, req_signature):
+    req_signature = req_header.get('X-Slack-Signature')
+    if not slack.verify_signature(req_timestamp, req_signature, req_data):
         logger.exception('Invalid request signature')
-        return make_response("", 403)
+        return await make_response("", 403)
 
     # Parse the request payload into JSON
-    event_data = json.loads(request.data.decode('utf-8'))
+    event_data = json.loads(req_data.decode('utf-8'))
 
     # Echo the URL verification challenge code back to Slack
     if "challenge" in event_data:
-        return make_response(
+        return await make_response(
             event_data.get("challenge"), 200, {"content_type": "application/json"}
         )
 
     # Parse the Event payload and emit the event to the event listener
     if "event" in event_data:
         event_type = event_data["event"]["type"]
+        print(event_type)
         if event_type == "app_home_opened":
-            home_open(event_data)
+            await home_open(event_data)
         elif event_type == "app_mention":
-            mentioned(event_data)
-        response = make_response("", 200)
+            await mentioned(event_data)
+        elif event_type == "message":
+            await on_message(event_data)
+        response = await make_response("", 200)
         # response.headers['X-Slack-Powered-By'] = self.package_info
         return response
 
 # @slack_events_adapter.on("app_home_opened")
-def home_open(payload):
+async def home_open(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
     print(f"Home opened from {user_id}")
-    slack.send_home_view(user_id, get_app_home(user_id))
+    await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
 # @slack_events_adapter.on("app_mention")
-def mentioned(payload):
+async def mentioned(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
     channel_id = event.get("channel")
     text = event.get("text")
     print("Mention!")
-    slack.send_chat_text(channel_id, "Please find me under Apps on your sidebar")
+    await slack.send_chat_text(channel_id, "Please find me under Apps on your sidebar")
 
 
-# @slack_events_adapter.on("message")
-# def message(payload):
-#     event = payload.get("event", {})
-#     user_id = event.get("user")
-#     # Disregard message from None which could be a message-delete event
-#     # Disregard own message
-#     if user_id is None or user_id == bot_user.data['user_id']:
-#         return
-#     channel_id = event.get("channel")
-#     text = event.get("text")
-
-# debug_print_msg(payload)
+async def on_message(payload):
+    event = payload.get("event", {})
+    user_id = event.get("user")
+    # Disregard message from None which could be a message-delete event
+    # Disregard own message
+    if user_id is None or user_id == slack.bot_user.data['user_id']:
+        return
+    channel_id = event.get("channel")
+    text = event.get("text")
+    await debug_print_msg(payload)
 
 # Views
-def get_app_home(user_id):
+async def get_app_home(user_id):
     current_status = manager.get_student_status(user_id)
     is_ta, is_active = manager.is_ta(user_id)
 
     # Info
     blocks = [
-        ui.welcome_title(slack.get_user_name(user_id)),
+        ui.welcome_title(await slack.get_user_name(user_id)),
         ui.greeting(is_ta, is_active),
     ]
 
@@ -115,7 +121,7 @@ def get_app_home(user_id):
         ui.active_ta(manager.get_ta_size())
     ]
     blocks += [ui.text(ta.name) for ta in manager.free_ta]
-    blocks += [ui.text(ta.get_status_text(ta_view=is_ta)) for ta in manager.pairs.keys()]
+    blocks += [ui.text(await ta.get_status_text(ta_view=is_ta)) for ta in manager.pairs.keys()]
 
     # Functional
     if current_status == 'idle':
@@ -141,7 +147,7 @@ def get_app_home(user_id):
             #  }
         ]
     else:
-        raise ValueError(f"Unexpected current_status: {current_status} for student {slack.get_user_name(user_id)}")
+        raise ValueError(f"Unexpected current_status: {current_status} for student {await slack.get_user_name(user_id)}")
 
     blocks += [ui.actions([ui.button(":arrows_counterclockwise: Refresh", INTERACTION_STUDENT_REFRESH)])]
     return {
@@ -189,7 +195,7 @@ def get_ta_verification():
     }
 
 
-def debug_print_msg(payload):
+async def debug_print_msg(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
     # Disregard own message
@@ -197,11 +203,11 @@ def debug_print_msg(payload):
         return
     channel_id = event.get("channel")
     text = event.get("text")
-    slack.send_chat_text(channel_id,
-                         f"""Hello! :tada: I received from {slack.get_user_name(user_id)} on channel {slack.get_channel_name(channel_id)}! Event type is {event.get("type")}
+    await slack.send_chat_text(channel_id,
+                         f"""Hello! :tada: I received from {await slack.get_user_name(user_id)} on channel {await slack.get_channel_name(channel_id)}! Event type is {event.get("type")}
 {text}
 """)
-    slack.send_chat_block(channel_id, slack.get_request_block(user_id))
+    await slack.send_chat_block(channel_id, await slack.get_request_block(user_id))
 
 
 # def disconnect_student(payload):
@@ -215,41 +221,41 @@ def debug_print_msg(payload):
 
 # https://api.slack.com/messaging/interactivity
 @app.route("/slack/interactive-endpoint", methods=["POST"])
-def interactive_received():
-    payload = json.loads(request.form["payload"])
+async def interactive_received():
+    payload = json.loads((await request.form)["payload"])
     assert payload['type'] in ['block_actions', 'view_submission']
     if payload['type'] == 'view_submission':
-        ta_verify_passwd(payload)
+        await ta_verify_passwd(payload)
     else:
         actions = payload['actions']
         assert len(actions) == 1
         action_value = actions[0]['value']
         if action_value == INTERACTION_STUDENT_REFRESH:
             user_id = payload['user']['id']
-            slack.send_home_view(user_id, get_app_home(user_id))
+            await slack.send_home_view(user_id, await get_app_home(user_id))
         if action_value == INTERACTION_STUDENT_CONNECT_TA:
-            student_connect(payload)
+            await student_connect(payload)
         elif action_value == INTERACTION_STUDENT_DEQUEUE:
-            student_dequeue(payload)
+            await student_dequeue(payload)
         elif action_value == INTERACTION_STUDENT_END_CHAT:
             disconnect_student(payload)
         elif action_value == INTERACTION_TA_DONE:
-            ta_done(payload)
+            await ta_done(payload)
         elif action_value == INTERACTION_TA_PASS:
             ta_pass(payload)
         elif action_value == INTERACTION_TA_LOGIN:
             trigger_id = payload['trigger_id']
-            slack.send_modal(trigger_id, get_ta_verification())
+            await slack.send_modal(trigger_id, get_ta_verification())
     # Send an HTTP 200 response with empty body so Slack knows we're done here
-    return make_response("", 200)
+    return await make_response("", 200)
 
 
-def ta_verify_passwd(payload):
+async def ta_verify_passwd(payload):
     user_id = payload['user']['id']
     passwd = payload['view']['state']['values'][INPUT_TA_PASS_ID]['field']['value']
     if passwd == TA_PASSWORD:
-        manager.ta_login(user_id)
-    slack.send_home_view(user_id, get_app_home(user_id))
+        await manager.ta_login(user_id)
+    await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
 #
@@ -272,28 +278,28 @@ def ta_verify_passwd(payload):
 #     slack.delete_chat(channel_id, msg_ts).send_chat_text(channel_id, 'TA Pass!')
 #
 #
-def ta_done(payload):
+async def ta_done(payload):
     channel_id = payload['channel']['id']
     msg_ts = payload['message']['ts']
     user_id = payload['user']['id']
-    student_name = manager.ta_complete_request(user_id)
+    student_name = await manager.ta_complete_request(user_id)
     print("TA Done!")
-    slack.delete_chat(channel_id, msg_ts).send_chat_text(channel_id, f'Finished helping {student_name}!')
+    await(await slack.delete_chat(channel_id, msg_ts)).send_chat_text(channel_id, f'Finished helping {student_name}!')
 
 
-def student_connect(payload):
+async def student_connect(payload):
     user_id = payload['user']['id']
     trigger_id = payload['trigger_id']
-    manager.student_connect(user_id, trigger_id)
-    slack.send_home_view(user_id, get_app_home(user_id))
+    await manager.student_request(user_id, trigger_id)
+    await slack.send_home_view(user_id, await get_app_home(user_id))
     print("Student connected!")
 
 
-def student_dequeue(payload):
+async def student_dequeue(payload):
     user_id = payload['user']['id']
     trigger_id = payload['trigger_id']
     manager.student_remove_from_queue(user_id, trigger_id)
-    slack.send_home_view(user_id, get_app_home(user_id))
+    await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
 if __name__ == "__main__":
@@ -301,4 +307,8 @@ if __name__ == "__main__":
     logger.setLevel(logging.DEBUG)
     logger.addHandler(logging.StreamHandler())
     ssl_context = ssl_lib.create_default_context(cafile=certifi.where())
-    app.run(port=3000)
+    # app.run(port=3000)
+    loop = asyncio.get_event_loop()
+    config = Config()
+    config.bind = ["localhost:3000"]
+    loop.run_until_complete(serve(app, config))

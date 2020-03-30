@@ -1,7 +1,4 @@
 from slack import WebClient
-from flask import request
-import json
-import platform
 import sys
 import hmac
 import hashlib
@@ -23,61 +20,62 @@ class Slack:
         # Initialize a Web API client
         # Note: Slack WebClient need to be in async mode in order to get two request at same time to work
         # https://github.com/slackapi/python-slackclient/issues/429
-        self.slack_web_client = WebClient(token=bot_token)  # , run_async=True)
-        self.bot_user = self.slack_web_client.auth_test()
-        self.all_users = self.slack_web_client.users_list()
+        self.slack_web_client = WebClient(token=bot_token, run_async=True)
+        slack_web_client_sync = WebClient(token=bot_token, run_async=False)  # TODO: Messy...
+        self.bot_user = slack_web_client_sync.auth_test()
+        self.all_users = slack_web_client_sync.users_list()
         self.id_to_name = dict()
         self.id_to_teamId = dict()
         self.signing_secret = signing_secret
 
-    def get_user_name(self, user_id):
+    async def get_user_name(self, user_id):
         if user_id not in self.id_to_name.keys():
             self.id_to_name[user_id] = \
-                self.slack_web_client.users_info(user=user_id).data['user']['profile']['display_name']
+                (await self.slack_web_client.users_info(user=user_id)).data['user']['profile']['display_name']
         return self.id_to_name[user_id]
 
-    def get_user_teamid(self, user_id):
+    async def get_user_teamid(self, user_id):
         if user_id not in self.id_to_teamId.keys():
-            self.id_to_teamId[user_id] = self.slack_web_client.users_info(user=user_id).data['user']['team_id']
+            self.id_to_teamId[user_id] = (await self.slack_web_client.users_info(user=user_id)).data['user']['team_id']
         return self.id_to_teamId[user_id]
 
-    def get_channel_name(self, channel_id):
-        channel_info = self.slack_web_client.conversations_info(channel=channel_id).data['channel']
+    async def get_channel_name(self, channel_id):
+        channel_info = (await self.slack_web_client.conversations_info(channel=channel_id)).data['channel']
         if channel_info['is_im']:
             im_with = channel_info['user']
-            return f'Private Message with {self.get_user_name(im_with)}'
+            return f'Private Message with {await self.get_user_name(im_with)}'
         else:
             return channel_info['name_normalized']
 
     def is_this_bot(self, user_id):
         return user_id == self.bot_user.data['user_id']
 
-    def send_chat_text(self, channel_id, text):
-        self.slack_web_client.chat_postMessage(channel=channel_id, text=text)
+    async def send_chat_text(self, channel_id, text):
+        await self.slack_web_client.chat_postMessage(channel=channel_id, text=text)
         return self
 
-    def send_chat_block(self, channel_id, block):
-        self.slack_web_client.chat_postMessage(channel=channel_id, blocks=block)
+    async def send_chat_block(self, channel_id, block):
+        await self.slack_web_client.chat_postMessage(channel=channel_id, blocks=block)
         return self
 
-    def send_home_view(self, user_id, view):
-        self.slack_web_client.views_publish(user_id=user_id, view=view)
+    async def send_home_view(self, user_id, view):
+        await self.slack_web_client.views_publish(user_id=user_id, view=view)
         return self
 
-    def send_modal(self, trigger_id, modal):
-        self.slack_web_client.views_open(trigger_id=trigger_id, view=modal)
+    async def send_modal(self, trigger_id, modal):
+        await self.slack_web_client.views_open(trigger_id=trigger_id, view=modal)
         return self
 
-    def delete_chat(self, channel_id, msg_ts):
-        self.slack_web_client.chat_delete(channel=channel_id, ts=msg_ts)
+    async def delete_chat(self, channel_id, msg_ts):
+        await self.slack_web_client.chat_delete(channel=channel_id, ts=msg_ts)
         return self
 
-    def get_im_channel(self, user_id):
-        return self.slack_web_client.conversations_open(users=[user_id])['channel']['id']
+    async def get_im_channel(self, user_id):
+        return (await self.slack_web_client.conversations_open(users=[user_id]))['channel']['id']
 
-    def get_request_block(self, student_uid):
-        student_name = self.get_user_name(student_uid)
-        student_im = f'slack://user?team={self.get_user_teamid(student_uid)}&id={student_uid}'
+    async def get_request_block(self, student_uid):
+        student_name = await self.get_user_name(student_uid)
+        student_im = f'slack://user?team={await self.get_user_teamid(student_uid)}&id={student_uid}'
         return [
             ui.text(f"You have a new request from {student_name}:\n*<{student_im}|Click to chat with {student_name} >*"),
             ui.text(f"*Question Brief:*\n<FIXME>"),
@@ -85,7 +83,7 @@ class Slack:
                         ui.button_styled("Pass to Other TA", INTERACTION_TA_PASS, "danger")])
         ]
 
-    def verify_signature(self, timestamp, signature):
+    def verify_signature(self, timestamp, signature, data):
         # Verify the request signature of the request sent from Slack
         # Generate a new hash using the app's signing secret and request data
 
@@ -94,7 +92,7 @@ class Slack:
         # It's recommended to use Python 2.7.7+
         # noqa See https://docs.python.org/2/whatsnew/2.7.html#pep-466-network-security-enhancements-for-python-2-7
         if hasattr(hmac, "compare_digest"):
-            req = str.encode('v0:' + str(timestamp) + ':') + request.get_data()
+            req = str.encode('v0:' + str(timestamp) + ':') + data
             request_hash = 'v0=' + hmac.new(
                 str.encode(self.signing_secret),
                 req, hashlib.sha256
@@ -106,7 +104,7 @@ class Slack:
                 return hmac.compare_digest(request_hash, signature)
         else:
             # So, we'll compare the signatures explicitly
-            req = str.encode('v0:' + str(timestamp) + ':') + request.get_data()
+            req = str.encode('v0:' + str(timestamp) + ':') + data
             request_hash = 'v0=' + hmac.new(
                 str.encode(self.signing_secret),
                 req, hashlib.sha256
