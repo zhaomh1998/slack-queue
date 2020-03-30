@@ -336,7 +336,7 @@ if __name__ == "__main__":
     ssl_context = ssl_lib.create_default_context(cafile=certifi.where())
     # app.run(port=3000)
     config = Config()
-    config.bind = ["localhost:3000"]
+    config.bind = ["localhost:80"]
     loop = asyncio.get_event_loop()
     logger.info('Server starting...')
     loop.run_until_complete(serve(app, config))
