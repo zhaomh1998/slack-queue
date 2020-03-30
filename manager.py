@@ -23,7 +23,7 @@ class TA:
         Completes a TA-Student connection
         *Caller responsible for setting status for student
         **Caller responsible for whether move this TA into list of free ta according to self.active
-        :return finished_student: finished student's ID
+        :return: finished student's ID
         """
         assert self.busy
         self.busy = False
@@ -98,6 +98,27 @@ class QueueManager:
             # The TA complete process is responsible for removing the TA if it's already inactive (no new request)
             the_ta.toggle_active()
 
+    def student_connect(self, user_id, trigger_id):
+        """
+        Search for a free TA and connect with the student, or put student into queue if no free TA
+        Caller responsible to refresh student afterwards
+        :param user_id: Student user ID
+        :param trigger_id: Student's button click trigger ID, for modal use, etc
+        """
+
+        # NOTE: Caller responsible to register this student a status
+        # This will be done when the home tab first presented to a student
+        assert self.student_status[user_id] == 'idle'
+        if len(self.free_ta) == 0:
+            self.student_status[user_id] = 'queued'
+            self.student_queue.append(user_id)
+        else:
+            self.student_status[user_id] = 'busy'
+            assigned_ta = self.free_ta[0]
+            assigned_ta.assign(user_id)
+            self.pairs[assigned_ta] = user_id
+            self.free_ta.remove(assigned_ta)
+
     def is_ta(self, user_id):
         """ Returns (is_ta, is_active) """
         if user_id in self.tas.keys():
@@ -116,6 +137,7 @@ class QueueManager:
         return self.student_queue.index(user_id) + 1
 
     def get_student_status(self, user_id):
+        # NOTE: Will automatically register a student with 'idle' status
         if user_id not in self.student_status.keys():
             self.student_status[user_id] = 'idle'
 

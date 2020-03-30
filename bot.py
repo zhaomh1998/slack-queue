@@ -311,26 +311,15 @@ def ta_verify_passwd(payload):
 #
 #
 #
-# def student_connect(payload):
-#     user_id = payload['user']['id']
-#     trigger_id = payload['trigger_id']
-#     assert student_status[user_id] == 'idle'
-#
-#     if len(free_ta) == 0:
-#         student_status[user_id] = 'queued'
-#         student_queue.append(user_id)
-#         slack_web_client.views_publish(user_id=user_id,
-#                                        view=get_app_home(user_id))
-#     else:
-#         student_status[user_id] = 'busy'
-#         assigned_ta = free_ta[0]
-#         assigned_ta.assign(user_id)
-#         busy_ta.append(assigned_ta)
-#         free_ta.remove(assigned_ta)
-#         slack_web_client.views_publish(user_id=user_id,
-#                                        view=get_app_home(user_id))
-#     print("Student connected!")
-#
+
+
+def student_connect(payload):
+    user_id = payload['user']['id']
+    trigger_id = payload['trigger_id']
+    manager.student_connect(user_id, trigger_id)
+    slack.send_home_view(user_id, get_app_home(user_id))
+    print("Student connected!")
+
 #
 # def student_dequeue(payload):
 #     user_id = payload['user']['id']
