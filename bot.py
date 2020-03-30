@@ -9,11 +9,12 @@ from time import time, strftime
 from manager import QueueManager
 from api import *
 import asyncio
+import signal
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 
 TA_PASSWORD = os.environ["SLACK_TA_PASSWD"]
-
+IP_ADDR = os.environ["IP_ADDR"]
 # Initialize a Flask app to host the events adapter
 app = Quart(__name__)
 slack = Slack(os.environ['SLACK_BOT_TOKEN'], os.environ["SLACK_SIGNING_SECRET"])
@@ -59,6 +60,11 @@ async def slack_event():
         response = await make_response("", 200)
         # response.headers['X-Slack-Powered-By'] = self.package_info
         return response
+
+
+@app.route("/status")
+async def ping():
+    return "Success!"
 
 
 async def home_open(payload):
@@ -146,7 +152,8 @@ async def get_app_home(user_id):
             #  }
         ]
     else:
-        raise ValueError(f"Unexpected current_status: {current_status} for student {await slack.get_user_name(user_id)}")
+        raise ValueError(
+            f"Unexpected current_status: {current_status} for student {await slack.get_user_name(user_id)}")
 
     blocks += [ui.actions([ui.button(":arrows_counterclockwise: Refresh", INTERACTION_STUDENT_REFRESH)])]
     return {
@@ -203,7 +210,7 @@ async def debug_print_msg(payload):
     channel_id = event.get("channel")
     text = event.get("text")
     await slack.send_chat_text(channel_id,
-                         f"""Hello! :tada: I received from {await slack.get_user_name(user_id)} on channel {await slack.get_channel_name(channel_id)}! Event type is {event.get("type")}
+                               f"""Hello! :tada: I received from {await slack.get_user_name(user_id)} on channel {await slack.get_channel_name(channel_id)}! Event type is {event.get("type")}
 {text}
 """)
     await slack.send_chat_block(channel_id, await slack.get_request_block(user_id))
@@ -310,6 +317,12 @@ async def student_dequeue(payload):
     manager.student_remove_from_queue(user_id, trigger_id)
     await slack.send_home_view(user_id, await get_app_home(user_id))
 
+shutdown_event = asyncio.Event()
+
+
+def _signal_handler(*_) -> None:
+    shutdown_event.set()
+
 
 if __name__ == "__main__":
     # Logging
@@ -329,7 +342,8 @@ if __name__ == "__main__":
     ssl_context = ssl_lib.create_default_context(cafile=certifi.where())
     # app.run(port=3000)
     config = Config()
-    config.bind = ["localhost:3000"]
+    config.bind = [f"{IP_ADDR}:3000"]
     loop = asyncio.get_event_loop()
     logger.info('Server starting...')
-    loop.run_until_complete(serve(app, config))
+    loop.add_signal_handler(signal.SIGTERM, _signal_handler)
+    loop.run_until_complete(serve(app, config, shutdown_trigger=shutdown_event.wait))
