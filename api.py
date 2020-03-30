@@ -52,3 +52,6 @@ class Slack:
     def delete_chat(self, channel_id, msg_ts):
         self.slack_web_client.chat_delete(channel=channel_id, ts=msg_ts)
         return self
+
+    def get_im_channel(self, user_id):
+        return self.slack_web_client.conversations_open(users=[user_id])['channel']['id']

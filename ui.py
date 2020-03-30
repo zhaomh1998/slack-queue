@@ -22,11 +22,14 @@ def welcome_title(greeting_name):
     return text(f"Logged in as {greeting_name}")
 
 
-def greeting(is_ta):
+def greeting(is_ta, is_active):
     if not is_ta:
         return text("I'm here to connect you to a TA during lab section.")
     else:
-        return text("You are logged in as a TA. Remember to log off when you're done.")
+        if is_active:
+            return text("You are logged in as a TA. Remember to log off when you're done.")
+        else:
+            return text("You are currently offline. Click TA Login to start accept requests.")
 
 
 def active_ta(active_num):

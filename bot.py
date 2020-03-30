@@ -66,12 +66,12 @@ def mentioned(payload):
 # Views
 def get_app_home(user_id):
     current_status = manager.get_student_status(user_id)
-    is_ta = manager.is_ta(user_id)
+    is_ta, is_active = manager.is_ta(user_id)
 
     # Info
     blocks = [
         ui.welcome_title(slack.get_user_name(user_id)),
-        ui.greeting(is_ta),
+        ui.greeting(is_ta, is_active),
     ]
 
     # Control Panel for TA Only
@@ -87,7 +87,7 @@ def get_app_home(user_id):
         ui.active_ta(manager.get_ta_size())
     ]
     blocks += [ui.text(ta.name) for ta in manager.free_ta]
-    blocks += [ui.text(ta.get_status_text(ta_view=is_ta)) for ta in manager.busy_ta]
+    blocks += [ui.text(ta.get_status_text(ta_view=is_ta)) for ta in manager.pairs.keys()]
 
     # Functional
     if current_status == 'idle':
