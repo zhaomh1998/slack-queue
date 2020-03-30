@@ -1,4 +1,4 @@
-from api import Slack
+from api import *
 
 
 class TA:
@@ -16,6 +16,7 @@ class TA:
         assert not self.busy
         self.busy = True
         self.helping_who = student_id
+        self.slack.send_chat_block(self.im, self.slack.get_request_block(student_id))
 
     # FIXME: Bug: log off then you can't complete current request
     def complete(self):
@@ -98,6 +99,23 @@ class QueueManager:
             # The TA complete process is responsible for removing the TA if it's already inactive (no new request)
             the_ta.toggle_active()
 
+    def ta_complete_request(self, ta_user_id):
+        """
+        Complete request from TA side
+        Checks it the TA is still online. If so, process student waiting queue.
+        Also sets student status back to idle.
+        :param ta_user_id: User ID for this TA
+        :return: Name of student this TA was helping
+        """
+        the_ta = self.tas[ta_user_id]
+        finished_student = the_ta.complete()
+        self.student_status[finished_student] = 'idle'
+        if the_ta.active:
+            self.free_ta.append(the_ta)
+            self.queue_move()
+        del self.pairs[the_ta]
+        return self.slack.get_user_name(finished_student)
+
     def student_connect(self, user_id, trigger_id):
         """
         Search for a free TA and connect with the student, or put student into queue if no free TA
@@ -118,6 +136,11 @@ class QueueManager:
             assigned_ta.assign(user_id)
             self.pairs[assigned_ta] = user_id
             self.free_ta.remove(assigned_ta)
+
+    def student_remove_from_queue(self, user_id, trigger_id):
+        assert user_id in self.student_queue
+        self.student_queue.remove(user_id)
+        self.student_status[user_id] = 'idle'
 
     def is_ta(self, user_id):
         """ Returns (is_ta, is_active) """

@@ -8,21 +8,12 @@ import json
 import nest_asyncio
 import ui
 from manager import QueueManager
-from api import Slack
+from api import *
 
 # https://github.com/spyder-ide/spyder/issues/7096
 # Resolved "Event loop already running" when running multiple API calls at same time
 nest_asyncio.apply()
 
-INTERACTION_STUDENT_REFRESH = 'RefreshHomePage'
-INTERACTION_STUDENT_CONNECT_TA = 'ConnectTA'
-INTERACTION_STUDENT_DEQUEUE = 'DequeueConnectTA'
-INTERACTION_STUDENT_END_CHAT = 'EndConnectTA'
-INTERACTION_TA_LOGIN = 'TALogIn'
-INTERACTION_TA_DONE = 'TADone'
-INTERACTION_TA_PASS = 'TAPass'
-INTERACTION_ADMIN_RESET = 'AdminReset'
-INPUT_TA_PASS_ID = 'TAPassID'
 TA_PASSWORD = os.environ["SLACK_TA_PASSWD"]
 
 # Initialize a Flask app to host the events adapter
@@ -161,54 +152,7 @@ def get_ta_verification():
     }
 
 
-def get_request_block(student_uid):
-    student_name = slack.get_user_name(student_uid)
-    student_im = f'slack://user?team={slack.get_user_teamid(student_uid)}&id={student_uid}'
-    return [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"You have a new request from {student_name}:\n*<{student_im}|Click to chat with {student_name} >*"
-            }
-        },
-        # TODO
-        # {
-        #     "type": "section",
-        #     "fields": [
-        #         {
-        #             "type": "mrkdwn",
-        #             "text": "*Question Brief:*\n<FIXME>"
-        #         }
-        #     ]
-        # },
 
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "emoji": True,
-                        "text": "Finished!"
-                    },
-                    "style": "primary",
-                    "value": INTERACTION_TA_DONE
-                },
-                # {
-                #     "type": "button",
-                #     "text": {
-                #         "type": "plain_text",
-                #         "emoji": True,
-                #         "text": "Pass to Other TA"
-                #     },
-                #     "style": "danger",
-                #     "value": INTERACTION_TA_PASS
-                # }
-            ]
-        }
-    ]
 
 
 def debug_print_msg(payload):
@@ -223,16 +167,16 @@ def debug_print_msg(payload):
                          f"""Hello! :tada: I received from {slack.get_user_name(user_id)} on channel {slack.get_channel_name(channel_id)}! Event type is {event.get("type")}
 {text}
 """)
-    slack.send_chat_block(channel_id, get_request_block(user_id))
+    slack.send_chat_block(channel_id, slack.get_request_block(user_id))
 
 
-def disconnect_student(payload):
-    raise NotImplementedError()
-    user_id = payload['user']['id']
-    student_status[user_id] = 'idle'
-    slack_web_client.views_publish(user_id=user_id,
-                                   view=get_app_home(user_id))
-    # TODO: Notify TA connected with this student
+# def disconnect_student(payload):
+#     raise NotImplementedError()
+#     user_id = payload['user']['id']
+#     student_status[user_id] = 'idle'
+#     slack_web_client.views_publish(user_id=user_id,
+#                                    view=get_app_home(user_id))
+#     # TODO: Notify TA connected with this student
 
 
 # https://api.slack.com/messaging/interactivity
@@ -273,15 +217,7 @@ def ta_verify_passwd(payload):
         manager.ta_login(user_id)
     slack.send_home_view(user_id, get_app_home(user_id))
 #
-#
-# def ta_complete(user_id):
-#     the_ta = tas[user_id]
-#     the_ta.complete()
-#     free_ta.append(the_ta)
-#     busy_ta.remove(the_ta)
-#     check_student_queue()
-#
-#
+
 # def ta_reassign(user_id):
 #     raise NotImplementedError()
 #     the_ta = tas[user_id]
@@ -300,17 +236,13 @@ def ta_verify_passwd(payload):
 #     slack.delete_chat(channel_id, msg_ts).send_chat_text(channel_id, 'TA Pass!')
 #
 #
-# def ta_done(payload):
-#     channel_id = payload['channel']['id']
-#     msg_ts = payload['message']['ts']
-#     user_id = payload['user']['id']
-#     student_name = slack.get_user_name(tas[user_id].helping_who)
-#     ta_complete(user_id)
-#     print("TA Done!")
-#     slack.delete_chat(channel_id, msg_ts).send_chat_text(channel_id, f'Finished helping {student_name}!')
-#
-#
-#
+def ta_done(payload):
+    channel_id = payload['channel']['id']
+    msg_ts = payload['message']['ts']
+    user_id = payload['user']['id']
+    student_name = manager.ta_complete_request(user_id)
+    print("TA Done!")
+    slack.delete_chat(channel_id, msg_ts).send_chat_text(channel_id, f'Finished helping {student_name}!')
 
 
 def student_connect(payload):
@@ -320,14 +252,12 @@ def student_connect(payload):
     slack.send_home_view(user_id, get_app_home(user_id))
     print("Student connected!")
 
-#
-# def student_dequeue(payload):
-#     user_id = payload['user']['id']
-#     trigger_id = payload['trigger_id']
-#     student_queue.remove(user_id)
-#     student_status[user_id] = 'idle'
-#     slack_web_client.views_publish(user_id=user_id,
-#                                    view=get_app_home(user_id))
+
+def student_dequeue(payload):
+    user_id = payload['user']['id']
+    trigger_id = payload['trigger_id']
+    manager.student_remove_from_queue(user_id, trigger_id)
+    slack.send_home_view(user_id, get_app_home(user_id))
 
 
 if __name__ == "__main__":

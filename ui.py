@@ -18,6 +18,17 @@ def button(text_str, value):
             "value": value}
 
 
+def button_styled(text_str, value, style):
+    # style='primary': green
+    # style='danger': red
+    return {"type": "button",
+            "text": {"type": "plain_text",
+                     "text": text_str,
+                     "emoji": True},
+            "style": style,
+            "value": value}
+
+
 def welcome_title(greeting_name):
     return text(f"Logged in as {greeting_name}")
 

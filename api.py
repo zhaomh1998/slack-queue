@@ -1,4 +1,15 @@
 from slack import WebClient
+import ui
+
+INTERACTION_STUDENT_REFRESH = 'RefreshHomePage'
+INTERACTION_STUDENT_CONNECT_TA = 'ConnectTA'
+INTERACTION_STUDENT_DEQUEUE = 'DequeueConnectTA'
+INTERACTION_STUDENT_END_CHAT = 'EndConnectTA'
+INTERACTION_TA_LOGIN = 'TALogIn'
+INTERACTION_TA_DONE = 'TADone'
+INTERACTION_TA_PASS = 'TAPass'
+INTERACTION_ADMIN_RESET = 'AdminReset'
+INPUT_TA_PASS_ID = 'TAPassID'
 
 
 class Slack:
@@ -14,7 +25,8 @@ class Slack:
 
     def get_user_name(self, user_id):
         if user_id not in self.id_to_name.keys():
-            self.id_to_name[user_id] = self.slack_web_client.users_info(user=user_id).data['user']['profile']['display_name']
+            self.id_to_name[user_id] = \
+                self.slack_web_client.users_info(user=user_id).data['user']['profile']['display_name']
         return self.id_to_name[user_id]
 
     def get_user_teamid(self, user_id):
@@ -55,3 +67,13 @@ class Slack:
 
     def get_im_channel(self, user_id):
         return self.slack_web_client.conversations_open(users=[user_id])['channel']['id']
+
+    def get_request_block(self, student_uid):
+        student_name = self.get_user_name(student_uid)
+        student_im = f'slack://user?team={self.get_user_teamid(student_uid)}&id={student_uid}'
+        return [
+            ui.text(f"You have a new request from {student_name}:\n*<{student_im}|Click to chat with {student_name} >*"),
+            ui.text(f"*Question Brief:*\n<FIXME>"),
+            ui.actions([ui.button_styled("Finished!", INTERACTION_TA_DONE, "primary"),
+                        ui.button_styled("Pass to Other TA", INTERACTION_TA_PASS, "danger")])
+        ]
