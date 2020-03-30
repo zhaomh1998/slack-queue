@@ -179,3 +179,11 @@ class QueueManager:
             self.busy_ta.append(assigned_ta)
             self.free_ta.remove(assigned_ta)
             return slack_operation
+
+    def get_ta_login_text(self, user_id):
+        if user_id not in self.tas:
+            return "TA Login"
+        elif self.tas[user_id].active:
+            return "TA Log Off"
+        else:
+            return "TA Login"

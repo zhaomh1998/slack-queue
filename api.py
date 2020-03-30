@@ -1,4 +1,10 @@
 from slack import WebClient
+from flask import request
+import json
+import platform
+import sys
+import hmac
+import hashlib
 import ui
 
 INTERACTION_STUDENT_REFRESH = 'RefreshHomePage'
@@ -13,7 +19,7 @@ INPUT_TA_PASS_ID = 'TAPassID'
 
 
 class Slack:
-    def __init__(self, bot_token):
+    def __init__(self, bot_token, signing_secret):
         # Initialize a Web API client
         # Note: Slack WebClient need to be in async mode in order to get two request at same time to work
         # https://github.com/slackapi/python-slackclient/issues/429
@@ -22,6 +28,7 @@ class Slack:
         self.all_users = self.slack_web_client.users_list()
         self.id_to_name = dict()
         self.id_to_teamId = dict()
+        self.signing_secret = signing_secret
 
     def get_user_name(self, user_id):
         if user_id not in self.id_to_name.keys():
@@ -77,3 +84,41 @@ class Slack:
             ui.actions([ui.button_styled("Finished!", INTERACTION_TA_DONE, "primary"),
                         ui.button_styled("Pass to Other TA", INTERACTION_TA_PASS, "danger")])
         ]
+
+    def verify_signature(self, timestamp, signature):
+        # Verify the request signature of the request sent from Slack
+        # Generate a new hash using the app's signing secret and request data
+
+        # Compare the generated hash and incoming request signature
+        # Python 2.7.6 doesn't support compare_digest
+        # It's recommended to use Python 2.7.7+
+        # noqa See https://docs.python.org/2/whatsnew/2.7.html#pep-466-network-security-enhancements-for-python-2-7
+        if hasattr(hmac, "compare_digest"):
+            req = str.encode('v0:' + str(timestamp) + ':') + request.get_data()
+            request_hash = 'v0=' + hmac.new(
+                str.encode(self.signing_secret),
+                req, hashlib.sha256
+            ).hexdigest()
+            # Compare byte strings for Python 2
+            if (sys.version_info[0] == 2):
+                return hmac.compare_digest(bytes(request_hash), bytes(signature))
+            else:
+                return hmac.compare_digest(request_hash, signature)
+        else:
+            # So, we'll compare the signatures explicitly
+            req = str.encode('v0:' + str(timestamp) + ':') + request.get_data()
+            request_hash = 'v0=' + hmac.new(
+                str.encode(self.signing_secret),
+                req, hashlib.sha256
+            ).hexdigest()
+
+            if len(request_hash) != len(signature):
+                return False
+            result = 0
+            if isinstance(request_hash, bytes) and isinstance(signature, bytes):
+                for x, y in zip(request_hash, signature):
+                    result |= x ^ y
+            else:
+                for x, y in zip(request_hash, signature):
+                    result |= ord(x) ^ ord(y)
+            return result == 0

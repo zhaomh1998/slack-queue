@@ -1,29 +1,66 @@
 import os
 import logging
 from flask import Flask, request, make_response, Response
-from slackeventsapi import SlackEventAdapter
+# from slackeventsapi import SlackEventAdapter
 import ssl as ssl_lib
 import certifi
 import json
 import nest_asyncio
 import ui
+from time import time
 from manager import QueueManager
 from api import *
-
-# https://github.com/spyder-ide/spyder/issues/7096
-# Resolved "Event loop already running" when running multiple API calls at same time
-nest_asyncio.apply()
+#
+# # https://github.com/spyder-ide/spyder/issues/7096
+# # Resolved "Event loop already running" when running multiple API calls at same time
+# nest_asyncio.apply()
 
 TA_PASSWORD = os.environ["SLACK_TA_PASSWD"]
 
 # Initialize a Flask app to host the events adapter
 app = Flask(__name__)
-slack_events_adapter = SlackEventAdapter(os.environ["SLACK_SIGNING_SECRET"], "/slack/events", app)
-slack = Slack(os.environ['SLACK_BOT_TOKEN'])
+# slack_events_adapter = SlackEventAdapter(os.environ["SLACK_SIGNING_SECRET"], "/slack/events", app)
+slack = Slack(os.environ['SLACK_BOT_TOKEN'], os.environ["SLACK_SIGNING_SECRET"])
 manager = QueueManager(slack)
 
 
-@slack_events_adapter.on("app_home_opened")
+@app.route("/slack/events", methods=['POST'])
+def slack_event():
+    # Each request comes with request timestamp and request signature
+    # emit an error if the timestamp is out of range
+    req_timestamp = request.headers.get('X-Slack-Request-Timestamp')
+    if abs(time() - int(req_timestamp)) > 60 * 5:
+        logger.exception('Invalid request timestamp')
+        return make_response("", 403)
+
+    # Verify the request signature using the app's signing secret
+    # emit an error if the signature can't be verified
+    req_signature = request.headers.get('X-Slack-Signature')
+    if not slack.verify_signature(req_timestamp, req_signature):
+        logger.exception('Invalid request signature')
+        return make_response("", 403)
+
+    # Parse the request payload into JSON
+    event_data = json.loads(request.data.decode('utf-8'))
+
+    # Echo the URL verification challenge code back to Slack
+    if "challenge" in event_data:
+        return make_response(
+            event_data.get("challenge"), 200, {"content_type": "application/json"}
+        )
+
+    # Parse the Event payload and emit the event to the event listener
+    if "event" in event_data:
+        event_type = event_data["event"]["type"]
+        if event_type == "app_home_opened":
+            home_open(event_data)
+        elif event_type == "app_mention":
+            mentioned(event_data)
+        response = make_response("", 200)
+        # response.headers['X-Slack-Powered-By'] = self.package_info
+        return response
+
+# @slack_events_adapter.on("app_home_opened")
 def home_open(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
@@ -31,7 +68,7 @@ def home_open(payload):
     slack.send_home_view(user_id, get_app_home(user_id))
 
 
-@slack_events_adapter.on("app_mention")
+# @slack_events_adapter.on("app_mention")
 def mentioned(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
@@ -84,7 +121,7 @@ def get_app_home(user_id):
     if current_status == 'idle':
         blocks += [ui.actions([
             ui.button(":telephone_receiver: Connect to a TA", INTERACTION_STUDENT_CONNECT_TA),
-            ui.button("TA Login", INTERACTION_TA_LOGIN),
+            ui.button(manager.get_ta_login_text(user_id), INTERACTION_TA_LOGIN),
         ])]
     elif current_status == 'queued':
         blocks += [ui.text(f"You are #{manager.get_queue_position(user_id)} in the queue"),
@@ -152,9 +189,6 @@ def get_ta_verification():
     }
 
 
-
-
-
 def debug_print_msg(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
@@ -216,6 +250,8 @@ def ta_verify_passwd(payload):
     if passwd == TA_PASSWORD:
         manager.ta_login(user_id)
     slack.send_home_view(user_id, get_app_home(user_id))
+
+
 #
 
 # def ta_reassign(user_id):
