@@ -1,11 +1,9 @@
 import os
 import logging
 from quart import Quart, request, make_response, Response
-# from slackeventsapi import SlackEventAdapter
 import ssl as ssl_lib
 import certifi
 import json
-import nest_asyncio
 import ui
 from time import time, strftime
 from manager import QueueManager
@@ -13,16 +11,11 @@ from api import *
 import asyncio
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
-#
-# # https://github.com/spyder-ide/spyder/issues/7096
-# # Resolved "Event loop already running" when running multiple API calls at same time
-# nest_asyncio.apply()
 
 TA_PASSWORD = os.environ["SLACK_TA_PASSWD"]
 
 # Initialize a Flask app to host the events adapter
 app = Quart(__name__)
-# slack_events_adapter = SlackEventAdapter(os.environ["SLACK_SIGNING_SECRET"], "/slack/events", app)
 slack = Slack(os.environ['SLACK_BOT_TOKEN'], os.environ["SLACK_SIGNING_SECRET"])
 manager = QueueManager(slack)
 
@@ -336,7 +329,7 @@ if __name__ == "__main__":
     ssl_context = ssl_lib.create_default_context(cafile=certifi.where())
     # app.run(port=3000)
     config = Config()
-    config.bind = ["localhost:80"]
+    config.bind = ["localhost:3000"]
     loop = asyncio.get_event_loop()
     logger.info('Server starting...')
     loop.run_until_complete(serve(app, config))
