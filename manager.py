@@ -41,17 +41,17 @@ class TA:
 
     async def toggle_active(self):
         self.active = not self.active
-        if self.active:
-            await self.slack.send_chat_text(self.im, "You have started accepting requests!")
-        else:
-            await self.slack.send_chat_text(self.im, "You are logged off and are no longer accepting new requests!")
+        # if self.active:
+        #     await self.slack.send_chat_text(self.im, "You have started accepting requests!")
+        # else:
+        #     await self.slack.send_chat_text(self.im, "You are logged off and are no longer accepting new requests!")
 
     async def get_status_text(self, ta_view):
         if self.busy:
             if ta_view:
-                return f'(Busy) {self.name} currently helping {await self.slack.get_user_name(self.helping_who)}'
+                return f'(Busy) {self.name} -- {await self.slack.get_user_name(self.helping_who)}'
             else:
-                return f'(Busy) {self.name} currently helping a student'
+                return f'{self.name} is busy helping a student'
         else:
             return f'{self.name}'
 
@@ -82,9 +82,17 @@ class QueueManager:
         self.pairs = dict()             # Currently connected TA - Student pairs
         self.student_queue = []         # Queue for all student ids waiting for next avil TA
         self.tas = dict()               # Stores all TA instances
-        self.student_status = dict()  # TODO: Refactor this into a class
+        self._student_status = dict()  # TODO: Refactor this into a class
         self.student_ta_connection = dict()
         self.slack = slack_web_client
+
+    def admin_reset(self):
+        self.free_ta = []
+        self.pairs = dict()
+        self.student_queue = []
+        self.tas = dict()
+        self._student_status = dict()
+        self.student_ta_connection = dict()
 
     async def ta_login(self, user_id):
         if user_id not in self.tas.keys():
@@ -116,7 +124,7 @@ class QueueManager:
         """
         the_ta = self.tas[ta_user_id]
         finished_student = the_ta.complete()
-        self.student_status[finished_student] = 'idle'
+        self.set_student_status(finished_student, 'idle')
         if the_ta.active:
             self.free_ta.append(the_ta)
             await self.queue_move()
@@ -130,12 +138,9 @@ class QueueManager:
         :param user_id: Student user ID
         :param trigger_id: Student's button click trigger ID, for modal use, etc
         """
-
-        # NOTE: Caller responsible to register this student a status
-        # This will be done when the home tab first presented to a student
-        assert self.student_status[user_id] == 'idle'
+        assert self.get_student_status(user_id) == 'idle'
         if len(self.free_ta) == 0:
-            self.student_status[user_id] = 'queued'
+            self.set_student_status(user_id, 'queued')
             self.student_queue.append(user_id)
         else:
             await self.make_connection(user_id)
@@ -143,7 +148,7 @@ class QueueManager:
     async def make_connection(self, student_id, free_ta_index=0):
         assert len(self.free_ta) != 0
         assert free_ta_index < len(self.free_ta)
-        self.student_status[student_id] = 'busy'
+        self.set_student_status(student_id, 'busy')
         assigned_ta = self.free_ta[free_ta_index]
         await assigned_ta.assign(student_id)
         self.pairs[assigned_ta] = student_id
@@ -152,7 +157,7 @@ class QueueManager:
     def student_remove_from_queue(self, user_id, trigger_id):
         assert user_id in self.student_queue
         self.student_queue.remove(user_id)
-        self.student_status[user_id] = 'idle'
+        self.set_student_status(user_id, 'idle')
 
     def is_ta(self, user_id):
         """ Returns (is_ta, is_active) """
@@ -164,6 +169,18 @@ class QueueManager:
     def get_queue_length(self):
         return len(self.student_queue)
 
+    async def str_queue(self):
+        if len(self.student_queue) == 0:
+            return 'Empty Queue. Looking good!'
+        else:
+            return '> ' + '\n> '.join([await self.slack.get_user_name(sid) for sid in self.student_queue])
+
+    def str_free_ta(self):
+        if len(self.free_ta) == 0:
+            return ''
+        else:
+            return '> ' + '\n> '.join([ta.name for ta in self.free_ta])
+
     def get_ta_size(self):
         return len(self.free_ta) + len(self.pairs)
 
@@ -172,11 +189,16 @@ class QueueManager:
         return self.student_queue.index(user_id) + 1
 
     def get_student_status(self, user_id):
-        # NOTE: Will automatically register a student with 'idle' status
-        if user_id not in self.student_status.keys():
-            self.student_status[user_id] = 'idle'
+        if user_id not in self._student_status.keys():
+            self._student_status[user_id] = 'idle'
 
-        return self.student_status[user_id]
+        return self._student_status[user_id]
+
+    def set_student_status(self, user_id, status):
+        assert status in ['idle', 'queued', 'busy']
+        self._student_status[user_id] = status
+
+        return self._student_status[user_id]
 
     async def queue_move(self):
         assert len(self.free_ta) != 0
@@ -189,8 +211,14 @@ class QueueManager:
 
     def get_ta_login_text(self, user_id):
         if user_id not in self.tas:
-            return "TA Login"
+            return ":key: TA Login"
         elif self.tas[user_id].active:
-            return "TA Log Off"
+            return ":zzz: TA Log Off"
         else:
-            return "TA Login"
+            return ":key: TA Login"
+
+    def is_ta_active(self, user_id):
+        if user_id in self.tas.keys():
+            if self.tas[user_id].active:
+                return True
+        return False

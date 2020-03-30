@@ -7,7 +7,7 @@ import certifi
 import json
 import nest_asyncio
 import ui
-from time import time
+from time import time, strftime
 from manager import QueueManager
 from api import *
 import asyncio
@@ -57,7 +57,6 @@ async def slack_event():
     # Parse the Event payload and emit the event to the event listener
     if "event" in event_data:
         event_type = event_data["event"]["type"]
-        print(event_type)
         if event_type == "app_home_opened":
             await home_open(event_data)
         elif event_type == "app_mention":
@@ -68,15 +67,14 @@ async def slack_event():
         # response.headers['X-Slack-Powered-By'] = self.package_info
         return response
 
-# @slack_events_adapter.on("app_home_opened")
+
 async def home_open(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
-    print(f"Home opened from {user_id}")
+    logger.debug(f"Home opened from {user_id}")
     await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
-# @slack_events_adapter.on("app_mention")
 async def mentioned(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
@@ -95,7 +93,12 @@ async def on_message(payload):
         return
     channel_id = event.get("channel")
     text = event.get("text")
-    await debug_print_msg(payload)
+    if text == "!h ping":
+        await slack.send_chat_text(channel_id, "pong :tada:")
+    elif text == "!h reset":
+        manager.admin_reset()
+    # await debug_print_msg(payload)
+
 
 # Views
 async def get_app_home(user_id):
@@ -112,25 +115,28 @@ async def get_app_home(user_id):
     if is_ta:
         blocks += [
             ui.DIVIDER,
-            ui.text(f"Student Queue Length: {manager.get_queue_length()}"),
-            ui.actions([ui.button("Admin Reset", INTERACTION_ADMIN_RESET)])
+            ui.text(f"*{manager.get_queue_length()} Students* waiting in queue"),
+            ui.text(await manager.str_queue()),
+            ui.actions([ui.button_styled("System States Reset", INTERACTION_ADMIN_RESET, "danger",
+                                         ui.reset_confirm())])
         ]
 
     blocks += [
         ui.DIVIDER,
         ui.active_ta(manager.get_ta_size())
     ]
-    blocks += [ui.text(ta.name) for ta in manager.free_ta]
-    blocks += [ui.text(await ta.get_status_text(ta_view=is_ta)) for ta in manager.pairs.keys()]
+    blocks += [ui.text(manager.str_free_ta())]
+    busy_tas = [await ta.get_status_text(ta_view=is_ta) for ta in manager.pairs.keys()]
+    blocks += [ui.list_quote_text(busy_tas)]
 
     # Functional
     if current_status == 'idle':
         blocks += [ui.actions([
-            ui.button(":telephone_receiver: Connect to a TA", INTERACTION_STUDENT_CONNECT_TA),
+            ui.button_styled(":telephone_receiver: Connect to a TA", INTERACTION_STUDENT_CONNECT_TA, "primary"),
             ui.button(manager.get_ta_login_text(user_id), INTERACTION_TA_LOGIN),
         ])]
     elif current_status == 'queued':
-        blocks += [ui.text(f"You are #{manager.get_queue_position(user_id)} in the queue"),
+        blocks += [ui.text(f"You are *#{manager.get_queue_position(user_id)}* in the queue"),
                    ui.actions([ui.button("Cancel Request", INTERACTION_STUDENT_DEQUEUE)])
                    ]
     elif current_status == 'busy':
@@ -245,7 +251,16 @@ async def interactive_received():
             ta_pass(payload)
         elif action_value == INTERACTION_TA_LOGIN:
             trigger_id = payload['trigger_id']
-            await slack.send_modal(trigger_id, get_ta_verification())
+            user_id = payload['user']['id']
+            if manager.is_ta_active(user_id):
+                await manager.ta_login(user_id)
+                await slack.send_home_view(user_id, await get_app_home(user_id))
+            else:
+                await slack.send_modal(trigger_id, get_ta_verification())
+        elif action_value == INTERACTION_ADMIN_RESET:
+            user_id = payload['user']['id']
+            manager.admin_reset()
+            await slack.send_home_view(user_id, await get_app_home(user_id))
     # Send an HTTP 200 response with empty body so Slack knows we're done here
     return await make_response("", 200)
 
@@ -283,32 +298,45 @@ async def ta_done(payload):
     msg_ts = payload['message']['ts']
     user_id = payload['user']['id']
     student_name = await manager.ta_complete_request(user_id)
-    print("TA Done!")
+    logger.debug(f"{user_id} has finished helping {student_name}")
     await(await slack.delete_chat(channel_id, msg_ts)).send_chat_text(channel_id, f'Finished helping {student_name}!')
 
 
 async def student_connect(payload):
     user_id = payload['user']['id']
+    logger.debug(f"Student {user_id} requests a connection!")
     trigger_id = payload['trigger_id']
     await manager.student_request(user_id, trigger_id)
     await slack.send_home_view(user_id, await get_app_home(user_id))
-    print("Student connected!")
 
 
 async def student_dequeue(payload):
     user_id = payload['user']['id']
+    logger.debug(f"Student {user_id} removes themselves from queue!")
     trigger_id = payload['trigger_id']
     manager.student_remove_from_queue(user_id, trigger_id)
     await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
 if __name__ == "__main__":
+    # Logging
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
-    logger.addHandler(logging.StreamHandler())
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    fh = logging.FileHandler(strftime("bot_%Y%b%d_%H-%M-%S.log"))
+    fh.setLevel(logging.DEBUG)
+    # create formatter and add it to the handlers
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
     ssl_context = ssl_lib.create_default_context(cafile=certifi.where())
     # app.run(port=3000)
-    loop = asyncio.get_event_loop()
     config = Config()
     config.bind = ["localhost:3000"]
+    loop = asyncio.get_event_loop()
+    logger.info('Server starting...')
     loop.run_until_complete(serve(app, config))

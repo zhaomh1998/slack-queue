@@ -78,9 +78,10 @@ class Slack:
         student_im = f'slack://user?team={await self.get_user_teamid(student_uid)}&id={student_uid}'
         return [
             ui.text(f"You have a new request from {student_name}:\n*<{student_im}|Click to chat with {student_name} >*"),
-            ui.text(f"*Question Brief:*\n<FIXME>"),
-            ui.actions([ui.button_styled("Finished!", INTERACTION_TA_DONE, "primary"),
-                        ui.button_styled("Pass to Other TA", INTERACTION_TA_PASS, "danger")])
+            # ui.text(f"*Question Brief:*\n<FIXME>"),
+            ui.actions([ui.button_styled("Finished!", INTERACTION_TA_DONE, "primary")
+                        # ui.button_styled("Pass to Other TA", INTERACTION_TA_PASS, "danger")
+                        ])
         ]
 
     def verify_signature(self, timestamp, signature, data):
