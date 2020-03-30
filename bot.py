@@ -1,191 +1,159 @@
 import os
 import logging
-from flask import Flask, request, make_response, Response
-from slack import WebClient
-from slackeventsapi import SlackEventAdapter
+from quart import Quart, request, make_response, Response
+# from slackeventsapi import SlackEventAdapter
 import ssl as ssl_lib
 import certifi
 import json
 import nest_asyncio
 import ui
+from time import time, strftime
+from manager import QueueManager
+from api import *
+import asyncio
+from hypercorn.config import Config
+from hypercorn.asyncio import serve
+#
+# # https://github.com/spyder-ide/spyder/issues/7096
+# # Resolved "Event loop already running" when running multiple API calls at same time
+# nest_asyncio.apply()
 
-# https://github.com/spyder-ide/spyder/issues/7096
-# Resolved "Event loop already running" when running multiple API calls at same time
-nest_asyncio.apply()
-
-INTERACTION_STUDENT_REFRESH = 'RefreshHomePage'
-INTERACTION_STUDENT_CONNECT_TA = 'ConnectTA'
-INTERACTION_STUDENT_DEQUEUE = 'DequeueConnectTA'
-INTERACTION_STUDENT_END_CHAT = 'EndConnectTA'
-INTERACTION_TA_LOGIN = 'TALogIn'
-INTERACTION_TA_DONE = 'TADone'
-INTERACTION_TA_PASS = 'TAPass'
-INTERACTION_ADMIN_RESET = 'AdminReset'
-INPUT_TA_PASS_ID = 'TAPassID'
 TA_PASSWORD = os.environ["SLACK_TA_PASSWD"]
 
-free_ta = []
-busy_ta = []
-student_queue = []
-tas = dict()
-id_to_name = dict()
-id_to_teamId = dict()
-student_status = dict()  # TODO: Refactor this into a class
-student_ta_connection = dict()
+# Initialize a Flask app to host the events adapter
+app = Quart(__name__)
+# slack_events_adapter = SlackEventAdapter(os.environ["SLACK_SIGNING_SECRET"], "/slack/events", app)
+slack = Slack(os.environ['SLACK_BOT_TOKEN'], os.environ["SLACK_SIGNING_SECRET"])
+manager = QueueManager(slack)
 
 
-class TA:
-    def __init__(self, uid):
-        self.uid = uid
-        self.busy = False
-        self.helping_who = 'ERR: NOT HELPING ANYONE'
-        self.active = False
-        self.name = get_user_name(uid)
-        self.im = slack_web_client.conversations_open(users=[self.uid])['channel']['id']
+@app.route("/slack/events", methods=['POST'])
+async def slack_event():
+    req_header = request.headers
+    req_data = await request.data
+    # Each request comes with request timestamp and request signature
+    # emit an error if the timestamp is out of range
+    req_timestamp = req_header.get('X-Slack-Request-Timestamp')
+    if abs(time() - int(req_timestamp)) > 60 * 5:
+        logger.exception('Invalid request timestamp')
+        return await make_response("", 403)
 
-    def assign(self, student_id):
-        assert not self.busy
-        self.busy = True
-        self.helping_who = student_id
-        slack_web_client.chat_postMessage(
-            channel=self.im,
-            blocks=get_request_block(self.helping_who)
+    # Verify the request signature using the app's signing secret
+    # emit an error if the signature can't be verified
+    req_signature = req_header.get('X-Slack-Signature')
+    if not slack.verify_signature(req_timestamp, req_signature, req_data):
+        logger.exception('Invalid request signature')
+        return await make_response("", 403)
+
+    # Parse the request payload into JSON
+    event_data = json.loads(req_data.decode('utf-8'))
+
+    # Echo the URL verification challenge code back to Slack
+    if "challenge" in event_data:
+        return await make_response(
+            event_data.get("challenge"), 200, {"content_type": "application/json"}
         )
 
-    def complete(self):
-        assert self.busy
-        self.busy = False
-        student_status[self.helping_who] = 'idle'
-        self.helping_who = 'ERR: NOT HELPING ANYONE'
-
-    def toggle_active(self):
-        self.active = not self.active
-        if self.active:
-            slack_web_client.chat_postMessage(
-                channel=self.im,
-                text="You have started accepting requests!"
-            )
-        else:
-            slack_web_client.chat_postMessage(
-                channel=self.im,
-                text="You are no longer accepting requests!"
-            )
-
-    def get_status_text(self, ta_view):
-        if self.busy:
-            if ta_view:
-                return f'(Busy) {self.name} currently helping {get_user_name(self.helping_who)}'
-            else:
-                return f'(Busy) {self.name} currently helping a student'
-        else:
-            return f'{self.name}'
-
-    def reassign(self):
-        # Notify student, change student_ta_connection, change self status, etc
-        raise NotImplementedError()
+    # Parse the Event payload and emit the event to the event listener
+    if "event" in event_data:
+        event_type = event_data["event"]["type"]
+        if event_type == "app_home_opened":
+            await home_open(event_data)
+        elif event_type == "app_mention":
+            await mentioned(event_data)
+        elif event_type == "message":
+            await on_message(event_data)
+        response = await make_response("", 200)
+        # response.headers['X-Slack-Powered-By'] = self.package_info
+        return response
 
 
-# Initialize a Flask app to host the events adapter
-app = Flask(__name__)
-slack_events_adapter = SlackEventAdapter(os.environ["SLACK_SIGNING_SECRET"], "/slack/events", app)
-
-# Initialize a Web API client
-# Note: Slack WebClient need to be in async mode in order to get two request at same time to work
-# https://github.com/slackapi/python-slackclient/issues/429
-slack_web_client = WebClient(token=os.environ['SLACK_BOT_TOKEN'])  # , run_async=True)
-bot_user = slack_web_client.auth_test()
-all_users = slack_web_client.users_list()
-
-
-@slack_events_adapter.on("app_home_opened")
-def home_open(payload):
+async def home_open(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
-    print(f"Home opened from {user_id}")
-    slack_web_client.views_publish(user_id=user_id,
-                                   view=get_app_home(user_id))
+    logger.debug(f"Home opened from {user_id}")
+    await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
-@slack_events_adapter.on("app_mention")
-def mentioned(payload):
+async def mentioned(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
     channel_id = event.get("channel")
     text = event.get("text")
     print("Mention!")
-    slack_web_client.chat_postMessage(
-        channel=channel_id,
-        text="Please find me under Apps on your sidebar"
-    )
+    await slack.send_chat_text(channel_id, "Please find me under Apps on your sidebar")
 
 
-# @slack_events_adapter.on("message")
-# def message(payload):
-#     event = payload.get("event", {})
-#     user_id = event.get("user")
-#     # Disregard message from None which could be a message-delete event
-#     # Disregard own message
-#     if user_id is None or user_id == bot_user.data['user_id']:
-#         return
-#     channel_id = event.get("channel")
-#     text = event.get("text")
+async def on_message(payload):
+    event = payload.get("event", {})
+    user_id = event.get("user")
+    # Disregard message from None which could be a message-delete event
+    # Disregard own message
+    if user_id is None or user_id == slack.bot_user.data['user_id']:
+        return
+    channel_id = event.get("channel")
+    text = event.get("text")
+    if text == "!h ping":
+        await slack.send_chat_text(channel_id, "pong :tada:")
+    elif text == "!h reset":
+        manager.admin_reset()
+    # await debug_print_msg(payload)
 
-# debug_print_msg(payload)
 
 # Views
-def get_app_home(user_id):
-    if user_id not in student_status.keys():
-        student_status[user_id] = 'idle'
-    current_status = student_status[user_id]
-
-    is_ta = True if user_id in tas else False
+async def get_app_home(user_id):
+    current_status = manager.get_student_status(user_id)
+    is_ta, is_active = manager.is_ta(user_id)
 
     # Info
     blocks = [
-        ui.welcome_title(get_user_name(user_id)),
-        ui.greeting(is_ta),
+        ui.welcome_title(await slack.get_user_name(user_id)),
+        ui.greeting(is_ta, is_active),
     ]
 
     # Control Panel for TA Only
     if is_ta:
         blocks += [
             ui.DIVIDER,
-            ui.text(f"Student Queue Length: {len(student_queue)}"),
-            ui.actions([ui.button("Admin Reset", INTERACTION_ADMIN_RESET)])
+            ui.text(f"*{manager.get_queue_length()} Students* waiting in queue"),
+            ui.text(await manager.str_queue()),
+            ui.actions([ui.button_styled("System States Reset", INTERACTION_ADMIN_RESET, "danger",
+                                         ui.reset_confirm())])
         ]
 
     blocks += [
         ui.DIVIDER,
-        ui.active_ta(len(free_ta) + len(busy_ta))
+        ui.active_ta(manager.get_ta_size())
     ]
-    blocks += [ui.text(ta.name) for ta in free_ta]
-    blocks += [ui.text(ta.get_status_text(ta_view=is_ta)) for ta in busy_ta]
+    blocks += [ui.text(manager.str_free_ta())]
+    busy_tas = [await ta.get_status_text(ta_view=is_ta) for ta in manager.pairs.keys()]
+    blocks += [ui.list_quote_text(busy_tas)]
 
     # Functional
     if current_status == 'idle':
         blocks += [ui.actions([
-            ui.button(":telephone_receiver: Connect to a TA", INTERACTION_STUDENT_CONNECT_TA),
-            ui.button("TA Login", INTERACTION_TA_LOGIN),
+            ui.button_styled(":telephone_receiver: Connect to a TA", INTERACTION_STUDENT_CONNECT_TA, "primary"),
+            ui.button(manager.get_ta_login_text(user_id), INTERACTION_TA_LOGIN),
         ])]
     elif current_status == 'queued':
-        blocks += [ui.text(f"You are #{student_queue.index(user_id) + 1} in the queue"),
+        blocks += [ui.text(f"You are *#{manager.get_queue_position(user_id)}* in the queue"),
                    ui.actions([ui.button("Cancel Request", INTERACTION_STUDENT_DEQUEUE)])
-        ]
+                   ]
     elif current_status == 'busy':
         blocks += [
             ui.text("You are connected with a TA. Look for their direct message in a moment.")
-                   # TODO: Haven't implemented notify TA so disabled for now
-                   # {"type": "actions",
-                   #  "elements": [{"type": "button",
-                   #                "text": {"type": "plain_text",
-                   #                         "text": "End Chat",
-                   #                         "emoji": True},
-                   #                "value": INTERACTION_STUDENT_END_CHAT}
-                   #               ]
-                   #  }
+            # TODO: Haven't implemented notify TA so disabled for now
+            # {"type": "actions",
+            #  "elements": [{"type": "button",
+            #                "text": {"type": "plain_text",
+            #                         "text": "End Chat",
+            #                         "emoji": True},
+            #                "value": INTERACTION_STUDENT_END_CHAT}
+            #               ]
+            #  }
         ]
     else:
-        raise ValueError(f"Unexpected current_status: {current_status} for student {get_user_name(user_id)}")
+        raise ValueError(f"Unexpected current_status: {current_status} for student {await slack.get_user_name(user_id)}")
 
     blocks += [ui.actions([ui.button(":arrows_counterclockwise: Refresh", INTERACTION_STUDENT_REFRESH)])]
     return {
@@ -233,268 +201,142 @@ def get_ta_verification():
     }
 
 
-def get_request_block(student_uid):
-    student_name = get_user_name(student_uid)
-    student_im = f'slack://user?team={get_user_teamid(student_uid)}&id={student_uid}'
-    return [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"You have a new request from {student_name}:\n*<{student_im}|Click to chat with {student_name} >*"
-            }
-        },
-        # TODO
-        # {
-        #     "type": "section",
-        #     "fields": [
-        #         {
-        #             "type": "mrkdwn",
-        #             "text": "*Question Brief:*\n<FIXME>"
-        #         }
-        #     ]
-        # },
-
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "emoji": True,
-                        "text": "Finished!"
-                    },
-                    "style": "primary",
-                    "value": INTERACTION_TA_DONE
-                },
-                # {
-                #     "type": "button",
-                #     "text": {
-                #         "type": "plain_text",
-                #         "emoji": True,
-                #         "text": "Pass to Other TA"
-                #     },
-                #     "style": "danger",
-                #     "value": INTERACTION_TA_PASS
-                # }
-            ]
-        }
-    ]
-
-
-def debug_print_msg(payload):
+async def debug_print_msg(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
     # Disregard own message
-    if user_id == bot_user.data['user_id']:
+    if slack.is_this_bot(user_id):
         return
     channel_id = event.get("channel")
     text = event.get("text")
-
-    slack_web_client.chat_postMessage(
-        channel=channel_id,
-        text=f"""Hello! :tada: I received from {get_user_name(user_id)} on channel {get_channel_name(channel_id)}! Event type is {event.get("type")}
+    await slack.send_chat_text(channel_id,
+                         f"""Hello! :tada: I received from {await slack.get_user_name(user_id)} on channel {await slack.get_channel_name(channel_id)}! Event type is {event.get("type")}
 {text}
-"""
-    )
-    slack_web_client.chat_postMessage(
-        channel=channel_id,
-        blocks=get_request_block(user_id)
-    )
+""")
+    await slack.send_chat_block(channel_id, await slack.get_request_block(user_id))
 
 
-def disconnect_student(payload):
-    raise NotImplementedError()
-    user_id = payload['user']['id']
-    student_status[user_id] = 'idle'
-    slack_web_client.views_publish(user_id=user_id,
-                                   view=get_app_home(user_id))
-    # TODO: Notify TA connected with this student
-
-
-def check_student_queue():
-    assert len(free_ta) != 0
-    if len(student_queue) != 0:
-        # Dequeue
-        user_id = student_queue[0]
-        student_queue.remove(user_id)
-
-        student_status[user_id] = 'busy'
-        assigned_ta = free_ta[0]
-        assigned_ta.assign(user_id)
-        busy_ta.append(assigned_ta)
-        free_ta.remove(assigned_ta)
-        slack_web_client.views_publish(user_id=user_id,
-                                       view=get_app_home(user_id))
+# def disconnect_student(payload):
+#     raise NotImplementedError()
+#     user_id = payload['user']['id']
+#     student_status[user_id] = 'idle'
+#     slack_web_client.views_publish(user_id=user_id,
+#                                    view=get_app_home(user_id))
+#     # TODO: Notify TA connected with this student
 
 
 # https://api.slack.com/messaging/interactivity
 @app.route("/slack/interactive-endpoint", methods=["POST"])
-def interactive_test():
-    payload = json.loads(request.form["payload"])
+async def interactive_received():
+    payload = json.loads((await request.form)["payload"])
     assert payload['type'] in ['block_actions', 'view_submission']
     if payload['type'] == 'view_submission':
-        ta_verify_passwd(payload)
+        await ta_verify_passwd(payload)
     else:
         actions = payload['actions']
         assert len(actions) == 1
         action_value = actions[0]['value']
         if action_value == INTERACTION_STUDENT_REFRESH:
             user_id = payload['user']['id']
-            slack_web_client.views_publish(user_id=user_id,
-                                           view=get_app_home(user_id))
+            await slack.send_home_view(user_id, await get_app_home(user_id))
         if action_value == INTERACTION_STUDENT_CONNECT_TA:
-            student_connect(payload)
+            await student_connect(payload)
         elif action_value == INTERACTION_STUDENT_DEQUEUE:
-            student_dequeue(payload)
+            await student_dequeue(payload)
         elif action_value == INTERACTION_STUDENT_END_CHAT:
             disconnect_student(payload)
         elif action_value == INTERACTION_TA_DONE:
-            ta_done(payload)
+            await ta_done(payload)
         elif action_value == INTERACTION_TA_PASS:
             ta_pass(payload)
         elif action_value == INTERACTION_TA_LOGIN:
             trigger_id = payload['trigger_id']
-            slack_web_client.views_open(trigger_id=trigger_id, view=get_ta_verification())
+            user_id = payload['user']['id']
+            if manager.is_ta_active(user_id):
+                await manager.ta_login(user_id)
+                await slack.send_home_view(user_id, await get_app_home(user_id))
+            else:
+                await slack.send_modal(trigger_id, get_ta_verification())
+        elif action_value == INTERACTION_ADMIN_RESET:
+            user_id = payload['user']['id']
+            manager.admin_reset()
+            await slack.send_home_view(user_id, await get_app_home(user_id))
     # Send an HTTP 200 response with empty body so Slack knows we're done here
-    return make_response("", 200)
+    return await make_response("", 200)
 
 
-def ta_verify_passwd(payload):
-    print("View submission!")
+async def ta_verify_passwd(payload):
     user_id = payload['user']['id']
     passwd = payload['view']['state']['values'][INPUT_TA_PASS_ID]['field']['value']
     if passwd == TA_PASSWORD:
-        if user_id not in tas:
-            tas[user_id] = TA(user_id)
-        the_ta = tas[user_id]
-
-        # TA Log on
-        if not the_ta.active:
-            free_ta.append(the_ta)
-            the_ta.toggle_active()
-            check_student_queue()
-        # TA Log off
-        else:
-            if the_ta in busy_ta:
-                the_ta.complete()
-                assert the_ta in busy_ta
-                busy_ta.remove(the_ta)
-            else:
-                assert the_ta in free_ta
-                free_ta.remove(the_ta)
-            the_ta.toggle_active()
-    slack_web_client.views_publish(user_id=user_id,
-                                   view=get_app_home(user_id))
+        await manager.ta_login(user_id)
+    await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
-def ta_complete(user_id):
-    the_ta = tas[user_id]
-    the_ta.complete()
-    free_ta.append(the_ta)
-    busy_ta.remove(the_ta)
-    check_student_queue()
+#
 
-
-def ta_reassign(user_id):
-    raise NotImplementedError()
-    the_ta = tas[user_id]
-    the_ta.reassign()
-    free_ta.append(the_ta)
-    busy_ta.remove(the_ta)
-    check_student_queue()
-
-
-def ta_pass(payload):
+# def ta_reassign(user_id):
+#     raise NotImplementedError()
+#     the_ta = tas[user_id]
+#     the_ta.reassign()
+#     free_ta.append(the_ta)
+#     busy_ta.remove(the_ta)
+#     check_student_queue()
+#
+#
+# def ta_pass(payload):
+#     channel_id = payload['channel']['id']
+#     msg_ts = payload['message']['ts']
+#     user_id = payload['user']['id']
+#     ta_reassign(user_id)
+#     print("TA Pass to next TA!")
+#     slack.delete_chat(channel_id, msg_ts).send_chat_text(channel_id, 'TA Pass!')
+#
+#
+async def ta_done(payload):
     channel_id = payload['channel']['id']
     msg_ts = payload['message']['ts']
     user_id = payload['user']['id']
-    ta_reassign(user_id)
-    print("TA Pass to next TA!")
-    slack_web_client.chat_delete(
-        channel=channel_id,
-        ts=msg_ts
-    )
-    slack_web_client.chat_postMessage(
-        channel=channel_id,
-        text='TA Pass!')
+    student_name = await manager.ta_complete_request(user_id)
+    logger.debug(f"{user_id} has finished helping {student_name}")
+    await(await slack.delete_chat(channel_id, msg_ts)).send_chat_text(channel_id, f'Finished helping {student_name}!')
 
 
-def ta_done(payload):
-    channel_id = payload['channel']['id']
-    msg_ts = payload['message']['ts']
+async def student_connect(payload):
     user_id = payload['user']['id']
-    student_name = get_user_name(tas[user_id].helping_who)
-    ta_complete(user_id)
-    print("TA Done!")
-    slack_web_client.chat_delete(
-        channel=channel_id,
-        ts=msg_ts
-    )
-    slack_web_client.chat_postMessage(
-        channel=channel_id,
-        text=f'Finished helping {student_name}')
-
-
-def student_connect(payload):
-    user_id = payload['user']['id']
+    logger.debug(f"Student {user_id} requests a connection!")
     trigger_id = payload['trigger_id']
-    assert student_status[user_id] == 'idle'
-
-    if len(free_ta) == 0:
-        student_status[user_id] = 'queued'
-        student_queue.append(user_id)
-        slack_web_client.views_publish(user_id=user_id,
-                                       view=get_app_home(user_id))
-    else:
-        student_status[user_id] = 'busy'
-        assigned_ta = free_ta[0]
-        assigned_ta.assign(user_id)
-        busy_ta.append(assigned_ta)
-        free_ta.remove(assigned_ta)
-        slack_web_client.views_publish(user_id=user_id,
-                                       view=get_app_home(user_id))
-    print("Student connected!")
+    await manager.student_request(user_id, trigger_id)
+    await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
-def student_dequeue(payload):
+async def student_dequeue(payload):
     user_id = payload['user']['id']
+    logger.debug(f"Student {user_id} removes themselves from queue!")
     trigger_id = payload['trigger_id']
-    student_queue.remove(user_id)
-    student_status[user_id] = 'idle'
-    slack_web_client.views_publish(user_id=user_id,
-                                   view=get_app_home(user_id))
-
-
-def get_user_name(user_id):
-    if user_id not in id_to_name.keys():
-        id_to_name[user_id] = slack_web_client.users_info(user=user_id).data['user']['profile']['display_name']
-    return id_to_name[user_id]
-
-
-def get_user_teamid(user_id):
-    if user_id not in id_to_teamId.keys():
-        id_to_teamId[user_id] = slack_web_client.users_info(user=user_id).data['user']['team_id']
-    return id_to_teamId[user_id]
-
-
-def get_channel_name(channel_id):
-    channel_info = slack_web_client.conversations_info(channel=channel_id).data['channel']
-    if channel_info['is_im']:
-        im_with = channel_info['user']
-        return f'Private Message with {get_user_name(im_with)}'
-    else:
-        return channel_info['name_normalized']
-
-
-def is_admin(user_id):
-    return True
+    manager.student_remove_from_queue(user_id, trigger_id)
+    await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
 if __name__ == "__main__":
+    # Logging
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
-    logger.addHandler(logging.StreamHandler())
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    fh = logging.FileHandler(strftime("bot_%Y%b%d_%H-%M-%S.log"))
+    fh.setLevel(logging.DEBUG)
+    # create formatter and add it to the handlers
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
     ssl_context = ssl_lib.create_default_context(cafile=certifi.where())
-    app.run(port=3000)
+    # app.run(port=3000)
+    config = Config()
+    config.bind = ["localhost:3000"]
+    loop = asyncio.get_event_loop()
+    logger.info('Server starting...')
+    loop.run_until_complete(serve(app, config))
