@@ -1,4 +1,6 @@
 import datetime
+import pytz
+
 DIVIDER = {"type": "divider"}
 
 
@@ -60,7 +62,9 @@ def reset_confirm():
 
 
 def welcome_title(greeting_name):
-    current_hour = datetime.datetime.now().hour
+    utc_now = pytz.utc.localize(datetime.datetime.utcnow())
+    pst_now = utc_now.astimezone(pytz.timezone("America/Los_Angeles"))
+    current_hour = pst_now.hour
     current_greeting = ("morning" if 5 <= current_hour <= 11
                         else "afternoon" if 12 <= current_hour <= 17
                         else "evening" if 18 <= current_hour <= 22
