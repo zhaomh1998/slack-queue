@@ -61,6 +61,21 @@ def reset_confirm():
     }
 
 
+def off_confirm():
+    return {
+        "title": {"type": "plain_text",
+                  "text": "Are you sure?"},
+        "text": {"type": "mrkdwn",
+                 "text": "This action will \n• *kick and notify* all students in queue"
+                         " \n• Make *all TA inactive* (_not accepting new requests_) \n"
+                         "• *Lock the system* from students new request. \nProceed?"},
+        "confirm": {"type": "plain_text",
+                    "text": "Do it"},
+        "deny": {"type": "plain_text",
+                 "text": "Nevermind!"}
+    }
+
+
 def welcome_title(greeting_name):
     utc_now = pytz.utc.localize(datetime.datetime.utcnow())
     pst_now = utc_now.astimezone(pytz.timezone("America/Los_Angeles"))
@@ -72,7 +87,10 @@ def welcome_title(greeting_name):
     return text(f"Good {current_greeting} {greeting_name},")
 
 
-def greeting(is_ta, is_active):
+def greeting(is_ta, is_active, is_system_on):
+    if not is_system_on:
+        return text("The queue system is off outside of lab section time."
+                    " Contact a TA if you believe this is an error.")
     if not is_ta:
         return text("We are here to help! Simply click _Connect to a TA_.")
     else:

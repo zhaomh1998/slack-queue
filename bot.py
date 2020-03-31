@@ -19,6 +19,7 @@ IP_ADDR = os.environ["IP_ADDR"]
 app = Quart(__name__)
 slack = Slack(os.environ['SLACK_BOT_TOKEN'], os.environ["SLACK_SIGNING_SECRET"])
 manager = QueueManager(slack)
+system_active = False
 
 
 @app.route("/slack/events", methods=['POST'])
@@ -101,13 +102,14 @@ async def on_message(payload):
 
 # Views
 async def get_app_home(user_id):
+    global system_active
     current_status = manager.get_student_status(user_id)
     is_ta, is_active = manager.is_ta(user_id)
 
     # Info
     blocks = [
         ui.welcome_title(await slack.get_user_name(user_id)),
-        ui.greeting(is_ta, is_active),
+        ui.greeting(is_ta, is_active, system_active),
     ]
 
     # Control Panel for TA Only
@@ -117,44 +119,54 @@ async def get_app_home(user_id):
             ui.text(f"*{manager.get_queue_length()} Students* waiting in queue"),
             ui.text(await manager.str_queue()),
             ui.actions([ui.button_styled("System States Reset", INTERACTION_ADMIN_RESET, "danger",
-                                         ui.reset_confirm())])
+                                         ui.reset_confirm()),
+                        ui.button_styled("Turn on system", INTERACTION_TA_MASTER_SWITCH, "primary"
+                                         ) if not system_active else
+                        ui.button_styled("Turn off system", INTERACTION_TA_MASTER_SWITCH, "danger",
+                                         ui.off_confirm())
+                        ])
         ]
-
-    blocks += [
-        ui.DIVIDER,
-        ui.active_ta(manager.get_ta_size())
-    ]
-    blocks += [ui.text(manager.str_free_ta())]
-    busy_tas = [await ta.get_status_text(ta_view=is_ta) for ta in manager.pairs.keys()]
-    blocks += [ui.list_quote_text(busy_tas)]
 
     # Functional
-    if current_status == 'idle':
-        blocks += [ui.actions([
-            ui.button_styled(":telephone_receiver: Connect to a TA", INTERACTION_STUDENT_CONNECT_TA, "primary"),
-            ui.button(manager.get_ta_login_text(user_id), INTERACTION_TA_LOGIN),
-        ])]
-    elif current_status == 'queued':
-        blocks += [ui.text(f"You are *#{manager.get_queue_position(user_id)}* in the queue"),
-                   ui.actions([ui.button("Cancel Request", INTERACTION_STUDENT_DEQUEUE)])
-                   ]
-    elif current_status == 'busy':
+    if system_active:
         blocks += [
-            ui.text("You are connected with a TA. Look for their direct message in a moment.")
-            # TODO: Haven't implemented notify TA so disabled for now
-            # {"type": "actions",
-            #  "elements": [{"type": "button",
-            #                "text": {"type": "plain_text",
-            #                         "text": "End Chat",
-            #                         "emoji": True},
-            #                "value": INTERACTION_STUDENT_END_CHAT}
-            #               ]
-            #  }
+            ui.DIVIDER,
+            ui.active_ta(manager.get_ta_size())
         ]
-    else:
-        raise ValueError(
-            f"Unexpected current_status: {current_status} for student {await slack.get_user_name(user_id)}")
+        blocks += [ui.text(manager.str_free_ta())]
+        busy_tas = [await ta.get_status_text(ta_view=is_ta) for ta in manager.pairs.keys()]
+        blocks += [ui.list_quote_text(busy_tas)]
 
+        if current_status == 'idle':
+            blocks += [ui.actions([
+                ui.button_styled(":telephone_receiver: Connect to a TA", INTERACTION_STUDENT_CONNECT_TA, "primary"),
+                ui.button(manager.get_ta_login_text(user_id), INTERACTION_TA_LOGIN),
+            ])]
+        elif current_status == 'queued':
+            blocks += [ui.text(f"You are *#{manager.get_queue_position(user_id)}* in the queue."
+                               f" Click *refresh* button below to refresh."),
+                       ui.actions([ui.button("Cancel Request", INTERACTION_STUDENT_DEQUEUE)])
+                       ]
+        elif current_status == 'busy':
+            blocks += [
+                ui.text("You are connected with a TA. Look for their direct message in a moment.")
+                # TODO: Haven't implemented notify TA so disabled for now
+                # {"type": "actions",
+                #  "elements": [{"type": "button",
+                #                "text": {"type": "plain_text",
+                #                         "text": "End Chat",
+                #                         "emoji": True},
+                #                "value": INTERACTION_STUDENT_END_CHAT}
+                #               ]
+                #  }
+            ]
+        else:
+            raise ValueError(
+                f"Unexpected current_status: {current_status} for student {await slack.get_user_name(user_id)}")
+    else:
+        blocks += [ui.actions([
+            ui.button(manager.get_ta_login_text(user_id), INTERACTION_TA_LOGIN)])
+        ]
     blocks += [ui.actions([ui.button(":arrows_counterclockwise: Refresh", INTERACTION_STUDENT_REFRESH)])]
     return {
         "type": "home",
@@ -228,6 +240,7 @@ async def debug_print_msg(payload):
 # https://api.slack.com/messaging/interactivity
 @app.route("/slack/interactive-endpoint", methods=["POST"])
 async def interactive_received():
+    global system_active
     payload = json.loads((await request.form)["payload"])
     assert payload['type'] in ['block_actions', 'view_submission']
     if payload['type'] == 'view_submission':
@@ -236,15 +249,14 @@ async def interactive_received():
         actions = payload['actions']
         assert len(actions) == 1
         action_value = actions[0]['value']
+        # NOTE: *** Expect people to click on button with old home view page -- may mess up states
+        # Certain buttons may not exist anymore in current page
+        # Example: Could still receive STUDENT_CONNECT_TA when system is switched off
+
+        # Not affected by system states
         if action_value == INTERACTION_STUDENT_REFRESH:
             user_id = payload['user']['id']
             await slack.send_home_view(user_id, await get_app_home(user_id))
-        if action_value == INTERACTION_STUDENT_CONNECT_TA:
-            await student_connect(payload)
-        elif action_value == INTERACTION_STUDENT_DEQUEUE:
-            await student_dequeue(payload)
-        elif action_value == INTERACTION_STUDENT_END_CHAT:
-            disconnect_student(payload)
         elif action_value == INTERACTION_TA_DONE:
             await ta_done(payload)
         elif action_value == INTERACTION_TA_PASS:
@@ -259,8 +271,26 @@ async def interactive_received():
                 await slack.send_modal(trigger_id, get_ta_verification())
         elif action_value == INTERACTION_ADMIN_RESET:
             user_id = payload['user']['id']
+            system_active = False
             manager.admin_reset()
             await slack.send_home_view(user_id, await get_app_home(user_id))
+        elif action_value == INTERACTION_TA_MASTER_SWITCH:
+            user_id = payload['user']['id']
+            system_active = not system_active
+            await manager.toggle_system_active(system_active)
+            await slack.send_home_view(user_id, await get_app_home(user_id))
+
+        # Is affected by system states
+        if not system_active:
+            user_id = payload['user']['id']
+            await slack.send_home_view(user_id, await get_app_home(user_id))
+        else:
+            if action_value == INTERACTION_STUDENT_CONNECT_TA:
+                await student_connect(payload)
+            elif action_value == INTERACTION_STUDENT_DEQUEUE:
+                await student_dequeue(payload)
+            elif action_value == INTERACTION_STUDENT_END_CHAT:
+                disconnect_student(payload)
     # Send an HTTP 200 response with empty body so Slack knows we're done here
     return await make_response("", 200)
 
@@ -303,7 +333,11 @@ async def ta_done(payload):
 
 
 async def student_connect(payload):
+    global system_active
     user_id = payload['user']['id']
+    if not system_active:
+        await slack.send_home_view(user_id, await get_app_home(user_id))
+        return
     logger.debug(f"Student {user_id} requests a connection!")
     trigger_id = payload['trigger_id']
     await manager.student_request(user_id, trigger_id)
