@@ -247,10 +247,10 @@ async def interactive_received():
     if payload['type'] == 'view_submission':
         await ta_verify_passwd(payload)
     else:
-        logger.debug(f"Action is {payload['actions']}")
         actions = payload['actions']
         assert len(actions) == 1
         action_value = actions[0]['value']
+        logger.debug(f"Action is {action_value}")
         # NOTE: *** Expect people to click on button with old home view page -- may mess up states
         # Certain buttons may not exist anymore in current page
         # Example: Could still receive STUDENT_CONNECT_TA when system is switched off
