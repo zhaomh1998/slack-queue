@@ -71,7 +71,7 @@ async def ping():
 async def home_open(payload):
     event = payload.get("event", {})
     user_id = event.get("user")
-    logger.debug(f"Home opened from {user_id}")
+    logger.debug(f"Home opened by {await slack.get_user_name(user_id)}")
     await slack.send_home_view(user_id, await get_app_home(user_id))
 
 
@@ -243,9 +243,11 @@ async def interactive_received():
     global system_active
     payload = json.loads((await request.form)["payload"])
     assert payload['type'] in ['block_actions', 'view_submission']
+    logger.debug(f"{payload['type']} triggered from {await slack.get_user_name(payload['user']['id'])}")
     if payload['type'] == 'view_submission':
         await ta_verify_passwd(payload)
     else:
+        logger.debug(f"Action is {payload['actions']}")
         actions = payload['actions']
         assert len(actions) == 1
         action_value = actions[0]['value']
@@ -328,7 +330,7 @@ async def ta_done(payload):
     msg_ts = payload['message']['ts']
     user_id = payload['user']['id']
     student_name = await manager.ta_complete_request(user_id)
-    logger.debug(f"{user_id} has finished helping {student_name}")
+    logger.debug(f"{await slack.get_user_name(user_id)} has finished helping {student_name}")
     await(await slack.delete_chat(channel_id, msg_ts)).send_chat_text(channel_id, f'Finished helping {student_name}!')
 
 
@@ -338,7 +340,7 @@ async def student_connect(payload):
     if not system_active:
         await slack.send_home_view(user_id, await get_app_home(user_id))
         return
-    logger.debug(f"Student {user_id} requests a connection!")
+    logger.debug(f"Student {await slack.get_user_name(user_id)} requests a connection!")
     trigger_id = payload['trigger_id']
     await manager.student_request(user_id, trigger_id)
     await slack.send_home_view(user_id, await get_app_home(user_id))
@@ -346,7 +348,7 @@ async def student_connect(payload):
 
 async def student_dequeue(payload):
     user_id = payload['user']['id']
-    logger.debug(f"Student {user_id} removes themselves from queue!")
+    logger.debug(f"Student {await slack.get_user_name(user_id)} removes themselves from queue!")
     trigger_id = payload['trigger_id']
     manager.student_remove_from_queue(user_id, trigger_id)
     await slack.send_home_view(user_id, await get_app_home(user_id))
