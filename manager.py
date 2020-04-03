@@ -158,7 +158,9 @@ class QueueManager:
         self.free_ta.remove(assigned_ta)
         # Send student notification
         await self.slack.send_chat_text(await self.slack.get_im_channel(student_id),
-                                        ":tada: You are now connected with a TA. They will DM you in a second.")
+                                        ":tada: You are now connected with a TA. They will DM you in a second."
+                                        " If you don't get any message within 1 minute,"
+                                        " DM your section lead to let them know.")
 
     def student_remove_from_queue(self, user_id, trigger_id):
         assert user_id in self.student_queue
